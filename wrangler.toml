@@ -1,0 +1,19 @@
+name = "controlscada-api"
+main = "src/index.js"
+compatibility_date = "2024-01-01"
+
+[env.production]
+name = "controlscada-api-prod"
+route = "https://api.controlscada.com/*"
+zone_id = "YOUR_ZONE_ID"
+
+[[r2_buckets]]
+binding = "R2_BUCKET"
+bucket_name = "controlscada-media"
+
+[build]
+command = "npm install"
+
+[env.production.vars]
+ENVIRONMENT = "production"
+API_BASE_URL = "https://api.railway.app"
