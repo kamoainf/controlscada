@@ -31,6 +31,7 @@ const PORT   = process.env.PORT || 8080;
 
 // ── État global WhatsApp ───────────────────────────────────────────────────────
 let waSocket      = null;
+let waSocketId    = 0;          // incrémenté à chaque nouvelle instance, détecte les sockets périmés
 let waStatus      = 'disconnected';
 let waQrBase64    = null;
 let waConnNumber  = null;
@@ -39,6 +40,7 @@ let waInitialized = false;
 let waReadyForAPI = false;
 let waReadyTimer  = null;
 let waCleanupInProgress = false;
+let waLoggedOutAt = 0;          // timestamp du dernier 440, empêche les re-sauvegardes post-nettoyage
 
 // ── Broadcast WebSocket ────────────────────────────────────────────────────────
 function broadcast(obj) {
@@ -89,6 +91,12 @@ async function initWhatsApp() {
     if (waInitialized) return;
     waInitialized = true;
 
+    // Si un logout vient de se produire, attendre que le nettoyage soit terminé
+    const timeSinceLogout = Date.now() - waLoggedOutAt;
+    if (waLoggedOutAt > 0 && timeSinceLogout < 3000) {
+        await new Promise(r => setTimeout(r, 3000 - timeSinceLogout));
+    }
+
     console.log('🔍 Vérification de la session stockée dans', AUTH_DIR, '...');
     const sessionOk = isSessionValid();
     if (!sessionOk && fs.existsSync(path.join(AUTH_DIR, 'creds.json'))) {
@@ -96,6 +104,9 @@ async function initWhatsApp() {
         cleanSession('session corrompue au démarrage');
         await new Promise(r => setTimeout(r, 1000));
     }
+
+    // Identifiant unique pour cette instance de socket
+    const mySocketId = ++waSocketId;
 
     try {
         const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = 
@@ -111,7 +122,21 @@ async function initWhatsApp() {
 
         console.log('📱 Baileys version:', version.join('.'));
 
-        const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+        const { state, saveCreds: _saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+
+        // Wrapper : n'écrit les creds que si ce socket est encore le socket courant
+        // et qu'aucun logout n'a été déclenché depuis. Empêche la boucle 440.
+        const saveCreds = () => {
+            if (mySocketId !== waSocketId) {
+                console.log('⚠️ saveCreds ignoré — socket périmé (id mismatch)');
+                return;
+            }
+            if (Date.now() - waLoggedOutAt < 30000) {
+                console.log('⚠️ saveCreds ignoré — logout récent, creds périmés');
+                return;
+            }
+            return _saveCreds();
+        };
 
         // Options de connexion renforcées
         waSocket = makeWASocket({
@@ -215,6 +240,8 @@ async function initWhatsApp() {
                 if (isLoggedOut) {
                     console.log('🚨 Code 440 / loggedOut détecté — nettoyage complet de la session');
                     broadcast({ type: 'status', status: 'logged_out', message: 'Session révoquée — nouveau QR requis' });
+                    waLoggedOutAt = Date.now();  // bloque saveCreds sur tous les sockets existants
+                    waSocketId++;               // invalide le socket courant immédiatement
                     cleanSession('code 440 / loggedOut');
                     waInitialized = false;
                     console.log('⏳ Attente 60s avant de relancer (anti-blocage WhatsApp)...');
