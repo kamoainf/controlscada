@@ -40,6 +40,10 @@ let waReadyForAPI = false;   // true seulement après stabilisation post-connexi
 let waReadyTimer  = null;    // timer de stabilisation
 let waCleanupInProgress = false; // évite les boucles de nettoyage infinies
 
+// ── Gestion des erreurs de décryptage ──────────────────────────────────────────
+let decryptionErrorCount = 0;
+let decryptionErrorTimer = null;
+
 // ── Broadcast WebSocket ────────────────────────────────────────────────────────
 function broadcast(obj) {
     const msg = JSON.stringify(obj);
@@ -56,7 +60,6 @@ if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
 
 /**
  * Vérifie si la session stockée semble valide (fichiers creds présents et non vides).
- * Retourne false si corrompue ou absente.
  */
 function isSessionValid() {
     try {
@@ -100,7 +103,6 @@ function cleanSession(reason = '') {
     } catch (e) {
         console.error('❌ Erreur nettoyage session:', e.message);
     } finally {
-        // Libérer le flag après un court délai pour éviter les appels en rafale
         setTimeout(() => { waCleanupInProgress = false; }, 3000);
     }
 }
@@ -110,14 +112,11 @@ async function initWhatsApp() {
     if (waInitialized) return;
     waInitialized = true;
 
-    // ── Vérification de la session au démarrage ────────────────────────────────
     console.log('🔍 Vérification de la session stockée dans', AUTH_DIR, '...');
     const sessionOk = isSessionValid();
     if (!sessionOk && fs.existsSync(path.join(AUTH_DIR, 'creds.json'))) {
-        // Des fichiers existent mais sont invalides → nettoyer avant de continuer
         console.log('🧹 Session corrompue détectée au démarrage — nettoyage préventif');
         cleanSession('session corrompue au démarrage');
-        // Attendre que le nettoyage soit terminé
         await new Promise(r => setTimeout(r, 1000));
     }
 
@@ -145,6 +144,8 @@ async function initWhatsApp() {
             browser: ['KAMOA SCADA', 'Chrome', '1.0'],
             generateHighQualityLinkPreview: false,
             syncFullHistory: false,
+            retrieveFullMessageHistoryOnReconnect: false,
+            ignoreUnencryptedMessages: true,
             connectTimeoutMs: 60000,
             keepAliveIntervalMs: 30000,
             retryRequestDelayMs: 5000,
@@ -154,6 +155,7 @@ async function initWhatsApp() {
             markOnlineOnConnect: false,
             fireInitQueries: false,
             getMessage: async () => undefined,
+            shouldIgnoreJid: (jid) => jid.includes('status') || jid === '0@broadcast',
         });
 
         // ── Événements avec logs détaillés ─────────────────────────────────────
@@ -162,7 +164,6 @@ async function initWhatsApp() {
             const { connection, lastDisconnect, qr } = update;
 
             if (qr) {
-                // Nouveau QR → la session précédente n'est plus valide
                 waReadyForAPI = false;
                 if (waReadyTimer) { clearTimeout(waReadyTimer); waReadyTimer = null; }
                 console.log('📲 QR Code string reçu (longueur:', qr.length, ')');
@@ -187,14 +188,13 @@ async function initWhatsApp() {
                 waStatus = 'open';
                 waConnected = true;
                 waQrBase64 = null;
-                waReadyForAPI = false; // pas encore prêt — attendre stabilisation
+                waReadyForAPI = false;
                 if (waReadyTimer) { clearTimeout(waReadyTimer); waReadyTimer = null; }
                 waConnNumber = waSocket.user?.id?.split(':')[0] || waSocket.user?.id || '';
                 broadcast({ type: 'status', status: 'open', phone: waConnNumber });
                 console.log('✅ WhatsApp connecté:', waConnNumber);
 
-                // ── Délai de stabilisation avant d'autoriser les appels API ────
-                const STABILIZATION_DELAY = 5000; // 5 secondes
+                const STABILIZATION_DELAY = 5000;
                 console.log(`⏳ Stabilisation en cours — API disponible dans ${STABILIZATION_DELAY / 1000}s...`);
                 waReadyTimer = setTimeout(() => {
                     if (waConnected) {
@@ -221,16 +221,13 @@ async function initWhatsApp() {
                     isLoggedOut ? '(session révoquée par WhatsApp)' : '');
 
                 if (isLoggedOut) {
-                    // ── Code 440 / loggedOut : session rejetée par WhatsApp ────
                     console.log('🚨 Code 440 / loggedOut détecté — nettoyage complet de la session');
                     broadcast({ type: 'status', status: 'logged_out', message: 'Session révoquée — nouveau QR requis' });
                     cleanSession('code 440 / loggedOut');
                     waInitialized = false;
-                    // Délai plus long pour éviter un blocage WhatsApp
                     console.log('⏳ Attente 12s avant de relancer (anti-blocage WhatsApp)...');
                     setTimeout(initWhatsApp, 12000);
                 } else {
-                    // Déconnexion réseau normale → reconnexion standard
                     waInitialized = false;
                     console.log('🔄 Reconnexion dans 5s...');
                     setTimeout(initWhatsApp, 5000);
@@ -243,9 +240,12 @@ async function initWhatsApp() {
         waSocket.ev.on('messages.upsert', ({ messages }) => {
             messages.forEach(msg => {
                 if (!msg.message) return;
+                // Ignorer les messages de protocole (notifications d'état)
+                if (msg.message?.protocolMessage) return;
                 const body = msg.message?.conversation
                     || msg.message?.extendedTextMessage?.text
                     || '';
+                if (!body) return;
                 const from = msg.key.remoteJid || '';
                 broadcast({
                     type: 'message',
@@ -256,6 +256,27 @@ async function initWhatsApp() {
 
         waSocket.ev.on('connection.error', (err) => {
             console.error('❌ connection.error Baileys:', err?.message || err);
+        });
+
+        // ── Gestion des erreurs de décryptage ──────────────────────────────────
+        waSocket.ev.on('message.retry', (msg) => {
+            if (msg.type === 'decryption-error') {
+                decryptionErrorCount++;
+                console.warn(`⚠️ Échec de décryptage #${decryptionErrorCount}`);
+                if (decryptionErrorTimer) clearTimeout(decryptionErrorTimer);
+                decryptionErrorTimer = setTimeout(() => {
+                    if (decryptionErrorCount >= 5) {
+                        console.error('❌ Trop d’erreurs de décryptage — réinitialisation de la session');
+                        cleanSession('trop d’erreurs de décryptage');
+                        waInitialized = false;
+                        waConnected = false;
+                        waReadyForAPI = false;
+                        if (waSocket) waSocket.end();
+                        setTimeout(initWhatsApp, 5000);
+                    }
+                    decryptionErrorCount = 0;
+                }, 10000);
+            }
         });
 
     } catch (err) {
@@ -371,7 +392,7 @@ app.post('/api/whatsapp/logout', async (req, res) => {
         waQrBase64 = null;
         waConnNumber = null;
         waInitialized = false;
-        waCleanupInProgress = false; // reset au cas où un nettoyage était bloqué
+        waCleanupInProgress = false;
         cleanSession('logout manuel');
         broadcast({ type: 'status', status: 'disconnected' });
         setTimeout(initWhatsApp, 2000);
@@ -381,9 +402,8 @@ app.post('/api/whatsapp/logout', async (req, res) => {
     }
 });
 
-// Récupérer groupes/contacts
+// Récupérer groupes ET contacts individuels (version robuste)
 app.get('/api/whatsapp/chats', async (req, res) => {
-    // Vérification 1 : socket présent et connecté
     if (!waConnected || !waSocket) {
         return res.status(503).json({
             error: 'WhatsApp non connecté',
@@ -391,8 +411,6 @@ app.get('/api/whatsapp/chats', async (req, res) => {
             hint: 'Scannez le QR code via /api/whatsapp/qrcode ou le WebSocket'
         });
     }
-
-    // Vérification 2 : délai de stabilisation respecté
     if (!waReadyForAPI) {
         return res.status(503).json({
             error: 'WhatsApp connecté mais pas encore prêt — stabilisation en cours',
@@ -404,28 +422,41 @@ app.get('/api/whatsapp/chats', async (req, res) => {
 
     try {
         console.log('📋 Récupération des groupes via groupFetchAllParticipating()...');
-
-        // Timeout de sécurité pour éviter un blocage infini
         const groupsPromise = waSocket.groupFetchAllParticipating();
         const timeoutPromise = new Promise((_, reject) =>
             setTimeout(() => reject(new Error('Timeout: groupFetchAllParticipating() > 20s')), 20000)
         );
-
         const groups = await Promise.race([groupsPromise, timeoutPromise]);
 
-        const chats = Object.entries(groups).map(([id, g]) => ({
+        const groupList = Object.entries(groups).map(([id, g]) => ({
             id,
             name: g.subject || id,
             isGroup: true,
             participants: g.participants?.length || 0
         }));
 
-        console.log(`✅ ${chats.length} groupe(s) récupéré(s)`);
-        res.json({ success: true, chats, count: chats.length });
+        // Récupération des conversations individuelles depuis le store (si disponible)
+        let contacts = [];
+        try {
+            if (waSocket.store && waSocket.store.chats) {
+                contacts = Array.from(waSocket.store.chats.values())
+                    .filter(c => !c.id.endsWith('@g.us'))
+                    .map(c => ({
+                        id: c.id,
+                        name: c.name || c.id.split('@')[0],
+                        isGroup: false,
+                        unread: c.unreadCount || 0
+                    }));
+            }
+        } catch (e) {
+            console.warn('⚠️ Impossible de récupérer les contacts individuels:', e.message);
+        }
+
+        console.log(`✅ ${groupList.length} groupe(s) et ${contacts.length} contact(s) récupéré(s)`);
+        res.json({ success: true, groups: groupList, contacts, count: groupList.length + contacts.length });
 
     } catch (err) {
-        console.error('❌ groupFetchAllParticipating() erreur:', err.message, '| stack:', err.stack?.split('\n')[1] || '');
-        // Si l'erreur indique une déconnexion, mettre à jour l'état
+        console.error('❌ groupFetchAllParticipating() erreur:', err.message);
         if (err.message?.includes('Connection Closed') || err.message?.includes('stream errored')) {
             waConnected = false;
             waReadyForAPI = false;
@@ -437,6 +468,19 @@ app.get('/api/whatsapp/chats', async (req, res) => {
             hint: 'Si le problème persiste, appelez POST /api/whatsapp/logout pour réinitialiser la session'
         });
     }
+});
+
+// Endpoint de diagnostic (aide au débogage)
+app.get('/api/whatsapp/debug', (req, res) => {
+    if (!waSocket) return res.json({ error: 'socket null', connected: false });
+    res.json({
+        user: waSocket.user,
+        connected: waConnected,
+        readyForAPI: waReadyForAPI,
+        wsReadyState: waSocket.ws?.readyState,
+        registered: waSocket.registered,
+        storeKeys: waSocket.store ? Object.keys(waSocket.store) : [],
+    });
 });
 
 // Fallback
