@@ -1,15 +1,18 @@
 /**
- * KAMOA Control SCADA — Backend Railway
- * WhatsApp via Evolution API + QR Code WebSocket push
- * Frontend: https://controlscada.pages.dev/
+ * KAMOA Control SCADA — server.js
+ * WhatsApp BAILEYS intégré directement (pas besoin d'Evolution API)
+ * Frontend : https://controlscada.pages.dev/
+ * Backend  : https://controlscada-production.up.railway.app/
  */
 
-const express    = require('express');
-const cors       = require('cors');
-const bodyParser = require('body-parser');
+const express     = require('express');
+const cors        = require('cors');
+const bodyParser  = require('body-parser');
 const compression = require('compression');
-const http       = require('http');
+const http        = require('http');
 const { WebSocketServer } = require('ws');
+const path        = require('path');
+const fs          = require('fs');
 require('dotenv').config();
 
 const app    = express();
@@ -17,26 +20,15 @@ const server = http.createServer(app);
 const wss    = new WebSocketServer({ server, path: '/ws' });
 const PORT   = process.env.PORT || 8080;
 
-// ── Variables d'état globales ─────────────────────────────────────────────────
-let waStatus      = 'disconnected';  // disconnected | connecting | open
-let waQrBase64    = null;
-let waQrInterval  = null;
-let waConnNumber  = null;
+// ── État global WhatsApp ───────────────────────────────────────────────────────
+let waSocket     = null;   // instance Baileys
+let waStatus     = 'disconnected';
+let waQrBase64   = null;
+let waConnNumber = null;
+let waConnected  = false;
+let waInitialized = false;
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-function getEvolutionConfig() {
-    return {
-        apiKey:       process.env.EVOLUTION_API_KEY  || process.env.WHATSAPP_API_KEY,
-        apiBaseUrl:   process.env.EVOLUTION_BASE_URL || process.env.WHATSAPP_API_BASE_URL,
-        instanceName: process.env.INSTANCE_NAME      || 'kamoa-instance-1'
-    };
-}
-
-function evolutionHeaders(apiKey) {
-    return { 'Content-Type': 'application/json', 'apikey': apiKey };
-}
-
-// Broadcast un objet JSON à tous les clients WebSocket connectés
+// ── Broadcast WebSocket ────────────────────────────────────────────────────────
 function broadcast(obj) {
     const msg = JSON.stringify(obj);
     wss.clients.forEach(ws => {
@@ -44,22 +36,108 @@ function broadcast(obj) {
     });
 }
 
-// Appel fetch vers Evolution API (Node 18+ built-in fetch)
-async function evolutionFetch(method, path, body = null) {
-    const { apiKey, apiBaseUrl } = getEvolutionConfig();
-    if (!apiKey || !apiBaseUrl) throw new Error('Evolution API non configurée (variables .env manquantes)');
+// ── Dossier auth (persist session entre redémarrages) ─────────────────────────
+const AUTH_DIR = path.join('/tmp', 'kamoa_auth');
+if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
 
-    const opts = {
-        method,
-        headers: evolutionHeaders(apiKey)
-    };
-    if (body) opts.body = JSON.stringify(body);
+// ── Initialiser Baileys ───────────────────────────────────────────────────────
+async function initWhatsApp() {
+    if (waInitialized) return;
+    waInitialized = true;
 
-    const res  = await fetch(`${apiBaseUrl}${path}`, opts);
-    const json = await res.json().catch(() => ({}));
+    try {
+        // Import dynamique (Baileys = ESM)
+        const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = 
+            await import('@whiskeysockets/baileys');
+        const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+        const { version } = await fetchLatestBaileysVersion();
 
-    if (!res.ok) throw Object.assign(new Error(json.message || res.statusText), { status: res.status, body: json });
-    return json;
+        console.log('📱 Baileys version:', version.join('.'));
+
+        waSocket = makeWASocket({
+            version,
+            auth: state,
+            printQRInTerminal: true,
+            browser: ['KAMOA SCADA', 'Chrome', '1.0'],
+            generateHighQualityLinkPreview: false,
+            syncFullHistory: false,
+        });
+
+        // ── Événement : QR Code ───────────────────────────────────────────────
+        waSocket.ev.on('connection.update', async (update) => {
+            const { connection, lastDisconnect, qr } = update;
+
+            if (qr) {
+                // Convertir QR string en image base64 via qrcode lib
+                try {
+                    const QRCode = require('qrcode');
+                    const qrBase64 = await QRCode.toDataURL(qr, { 
+                        width: 300, 
+                        margin: 2,
+                        color: { dark: '#000000', light: '#ffffff' }
+                    });
+                    waQrBase64 = qrBase64;
+                    waStatus = 'connecting';
+                    broadcast({ type: 'qr', qr: qrBase64 });
+                    broadcast({ type: 'status', status: 'connecting' });
+                    console.log('📲 QR Code généré et diffusé');
+                } catch (e) {
+                    console.error('QR gen error:', e.message);
+                }
+            }
+
+            if (connection === 'open') {
+                waStatus = 'open';
+                waConnected = true;
+                waQrBase64 = null;
+                waConnNumber = waSocket.user?.id?.split(':')[0] || waSocket.user?.id || '';
+                broadcast({ type: 'status', status: 'open', phone: waConnNumber });
+                console.log('✅ WhatsApp connecté:', waConnNumber);
+            }
+
+            if (connection === 'close') {
+                waConnected = false;
+                waStatus = 'disconnected';
+                broadcast({ type: 'status', status: 'disconnected' });
+                const code = lastDisconnect?.error?.output?.statusCode;
+                const shouldReconnect = code !== DisconnectReason.loggedOut;
+                console.log('🔴 Connexion fermée, code:', code, '— reconnect:', shouldReconnect);
+                if (shouldReconnect) {
+                    waInitialized = false;
+                    setTimeout(initWhatsApp, 5000);
+                } else {
+                    // Logged out — supprimer la session
+                    fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+                    fs.mkdirSync(AUTH_DIR, { recursive: true });
+                    waInitialized = false;
+                    setTimeout(initWhatsApp, 2000);
+                }
+            }
+        });
+
+        // ── Sauvegarder credentials ───────────────────────────────────────────
+        waSocket.ev.on('creds.update', saveCreds);
+
+        // ── Messages entrants ─────────────────────────────────────────────────
+        waSocket.ev.on('messages.upsert', ({ messages }) => {
+            messages.forEach(msg => {
+                if (!msg.message) return;
+                const body = msg.message?.conversation 
+                    || msg.message?.extendedTextMessage?.text 
+                    || '';
+                const from = msg.key.remoteJid || '';
+                broadcast({ 
+                    type: 'message', 
+                    data: { from, body, fromMe: msg.key.fromMe, ts: msg.messageTimestamp }
+                });
+            });
+        });
+
+    } catch (err) {
+        console.error('❌ Baileys init error:', err.message);
+        waInitialized = false;
+        setTimeout(initWhatsApp, 8000);
+    }
 }
 
 // ── Middleware ────────────────────────────────────────────────────────────────
@@ -67,235 +145,132 @@ app.use(compression());
 app.use(cors({
     origin: [
         'https://controlscada.pages.dev',
+        'https://controlscada-production.up.railway.app',
         'http://localhost:3000',
-        'http://localhost:8080'
+        'http://localhost:8080',
+        '*'
     ],
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'x-api-key', 'apikey']
+    allowedHeaders: ['Content-Type', 'Authorization', 'x-api-key']
 }));
 app.options('*', cors());
-app.use(bodyParser.json({ limit: '50mb' }));
-app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }));
+app.use(bodyParser.json({ limit: '10mb' }));
+app.use(bodyParser.urlencoded({ extended: true }));
 app.use(express.static('./'));
 
-// ── WebSocket ─────────────────────────────────────────────────────────────────
+// ── WebSocket : envoyer état courant aux nouveaux clients ──────────────────────
 wss.on('connection', (ws) => {
     console.log('🔌 WS client connecté');
-    // Envoyer l'état courant immédiatement
     ws.send(JSON.stringify({ type: 'status', status: waStatus, phone: waConnNumber }));
-    if (waQrBase64 && waStatus !== 'open') {
+    if (waQrBase64 && waStatus === 'connecting') {
         ws.send(JSON.stringify({ type: 'qr', qr: waQrBase64 }));
     }
+    ws.on('error', () => {});
 });
 
-// ── Polling QR / Statut ───────────────────────────────────────────────────────
-async function pollConnectionStatus() {
-    const { instanceName } = getEvolutionConfig();
-    try {
-        const data = await evolutionFetch('GET', `/instance/connectionState/${instanceName}`);
-        const state = data?.instance?.state || data?.state || 'disconnected';
+// ── API Routes ────────────────────────────────────────────────────────────────
 
-        if (state !== waStatus) {
-            waStatus = state;
-            broadcast({ type: 'status', status: waStatus, phone: waConnNumber });
-            console.log(`📡 WA State → ${waStatus}`);
-        }
-
-        if (state === 'open') {
-            // Connecté : arrêter le polling QR
-            waQrBase64 = null;
-            stopQrPolling();
-        } else if (state === 'connecting' || state === 'disconnected') {
-            await fetchAndBroadcastQR();
-        }
-    } catch (err) {
-        console.warn('⚠️ pollConnectionStatus:', err.message);
-    }
-}
-
-async function fetchAndBroadcastQR() {
-    const { instanceName } = getEvolutionConfig();
-    try {
-        const data = await evolutionFetch('GET', `/instance/connect/${instanceName}`);
-        const qr = data?.base64 || data?.qrcode?.base64 || data?.qr;
-        if (qr && qr !== waQrBase64) {
-            waQrBase64 = qr;
-            broadcast({ type: 'qr', qr });
-            console.log('📲 Nouveau QR Code diffusé');
-        }
-    } catch (err) {
-        console.warn('⚠️ fetchAndBroadcastQR:', err.message);
-    }
-}
-
-function startQrPolling() {
-    if (waQrInterval) return;
-    waQrInterval = setInterval(pollConnectionStatus, 8000);
-    pollConnectionStatus(); // Appel immédiat
-    console.log('🔄 QR Polling démarré');
-}
-
-function stopQrPolling() {
-    if (waQrInterval) { clearInterval(waQrInterval); waQrInterval = null; }
-}
-
-// ── Health ────────────────────────────────────────────────────────────────────
+// Health
 app.get('/api/health', (req, res) => {
-    res.json({ status: 'online', timestamp: new Date(), app: 'KAMOA SCADA', waStatus });
+    res.json({ 
+        status: 'online', 
+        timestamp: new Date(), 
+        app: 'KAMOA SCADA',
+        whatsapp: { status: waStatus, phone: waConnNumber, connected: waConnected }
+    });
 });
 
-// ── WhatsApp : Initialiser l'instance + démarrer QR polling ──────────────────
+// Init / démarrer QR
 app.post('/api/whatsapp/init', async (req, res) => {
-    const { instanceName } = getEvolutionConfig();
     try {
-        // Vérifier si l'instance existe déjà
-        let instanceReady = false;
-        try {
-            const info = await evolutionFetch('GET', `/instance/fetchInstances`);
-            const instances = Array.isArray(info) ? info : info?.instances || [];
-            instanceReady = instances.some(i => i.instance?.instanceName === instanceName || i.instanceName === instanceName);
-        } catch (_) {}
-
-        if (!instanceReady) {
-            console.log('📱 Création instance Evolution...');
-            await evolutionFetch('POST', '/instance/create', {
-                instanceName,
-                integration: 'WHATSAPP-BAILEYS',
-                qrcode: true
-            });
+        if (waConnected) {
+            return res.json({ success: true, status: 'open', phone: waConnNumber, message: 'Déjà connecté' });
         }
-
-        startQrPolling();
-        res.json({ success: true, message: 'Instance initialisée, QR polling actif', instanceName });
-    } catch (err) {
-        console.error('❌ Init error:', err.message);
-        res.status(500).json({ error: err.message, detail: err.body });
-    }
-});
-
-// ── WhatsApp : Obtenir QR Code (REST fallback si pas de WS) ──────────────────
-app.get('/api/whatsapp/qrcode', async (req, res) => {
-    const { instanceName } = getEvolutionConfig();
-    try {
-        const data = await evolutionFetch('GET', `/instance/connect/${instanceName}`);
-        const qr   = data?.base64 || data?.qrcode?.base64 || data?.qr;
-        if (!qr) return res.status(404).json({ error: 'Pas de QR code disponible', detail: data });
-        res.json({ success: true, qrCode: qr });
-    } catch (err) {
-        res.status(500).json({ error: err.message, detail: err.body });
-    }
-});
-
-// ── WhatsApp : Statut connexion ───────────────────────────────────────────────
-app.get('/api/whatsapp/status', async (req, res) => {
-    const { instanceName } = getEvolutionConfig();
-    try {
-        const data  = await evolutionFetch('GET', `/instance/connectionState/${instanceName}`);
-        const state = data?.instance?.state || data?.state || 'disconnected';
-        waStatus    = state;
-        res.json({ success: true, status: state, phone: waConnNumber });
+        waInitialized = false;
+        initWhatsApp();
+        res.json({ success: true, message: 'Initialisation Baileys démarrée', status: waStatus });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
 
-// ── WhatsApp : Envoyer message texte ─────────────────────────────────────────
-app.post('/api/whatsapp/send', async (req, res) => {
-    const { to, message } = req.body;
-    if (!to || !message) return res.status(400).json({ error: 'Champs manquants: to, message' });
-
-    const { instanceName } = getEvolutionConfig();
-    const number = to.replace(/\D/g, '');
-
-    try {
-        const data = await evolutionFetch('POST', `/message/sendText/${instanceName}`, {
-            number,
-            text: message
-        });
-        res.json({ success: true, data });
-    } catch (err) {
-        res.status(500).json({ error: err.message, detail: err.body });
-    }
+// Statut
+app.get('/api/whatsapp/status', (req, res) => {
+    res.json({ success: true, status: waStatus, phone: waConnNumber, connected: waConnected });
 });
 
-// ── WhatsApp : Déconnecter / Logout ──────────────────────────────────────────
-app.post('/api/whatsapp/logout', async (req, res) => {
-    const { instanceName } = getEvolutionConfig();
-    stopQrPolling();
-    waStatus = 'disconnected'; waQrBase64 = null; waConnNumber = null;
+// QR Code (fallback REST)
+app.get('/api/whatsapp/qrcode', (req, res) => {
+    if (waConnected) return res.json({ success: true, status: 'open', phone: waConnNumber });
+    if (!waQrBase64) return res.status(404).json({ error: 'QR pas encore prêt — réessayez dans 3s' });
+    res.json({ success: true, qrCode: waQrBase64 });
+});
+
+// Envoyer message
+app.post('/api/whatsapp/send', async (req, res) => {
+    const { to, message } = req.body;
+    if (!to || !message) return res.status(400).json({ error: 'Champs requis: to, message' });
+    if (!waConnected || !waSocket) return res.status(503).json({ error: 'WhatsApp non connecté' });
+
     try {
-        await evolutionFetch('DELETE', `/instance/logout/${instanceName}`);
-        broadcast({ type: 'status', status: 'disconnected' });
+        const jid = to.replace(/\D/g, '') + '@s.whatsapp.net';
+        await waSocket.sendMessage(jid, { text: message });
         res.json({ success: true });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
 
-// ── WhatsApp : Webhook Evolution API ─────────────────────────────────────────
-app.post('/api/webhooks/whatsapp', (req, res) => {
-    const data  = req.body;
-    const event = data?.event || data?.type;
-    console.log(`📨 Webhook [${event}]`);
-
-    if (event === 'connection.update') {
-        const state = data?.data?.state || data?.state;
-        if (state) {
-            waStatus = state;
-            if (state === 'open') waConnNumber = data?.data?.wuid || null;
-            broadcast({ type: 'status', status: waStatus, phone: waConnNumber });
-            if (state === 'open') stopQrPolling();
-        }
-        // QR dans le webhook
-        const qr = data?.data?.qrcode?.base64 || data?.qr;
-        if (qr) {
-            waQrBase64 = qr;
-            broadcast({ type: 'qr', qr });
-        }
-    } else if (event === 'messages.upsert' || event === 'messages.set') {
-        broadcast({ type: 'message', data });
+// Logout / Reset session
+app.post('/api/whatsapp/logout', async (req, res) => {
+    try {
+        if (waSocket) await waSocket.logout().catch(() => {});
+        waSocket = null; waConnected = false; waStatus = 'disconnected';
+        waQrBase64 = null; waConnNumber = null; waInitialized = false;
+        fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+        fs.mkdirSync(AUTH_DIR, { recursive: true });
+        broadcast({ type: 'status', status: 'disconnected' });
+        setTimeout(initWhatsApp, 1000);
+        res.json({ success: true, message: 'Session réinitialisée, nouveau QR en cours...' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
-
-    res.json({ received: true });
 });
 
-// ── Config runtime (optionnel, pour mise à jour sans redéploiement) ───────────
-app.post('/api/whatsapp/config', (req, res) => {
-    const { apiKey, apiBaseUrl, instanceName } = req.body;
-    if (apiKey)       process.env.EVOLUTION_API_KEY  = apiKey;
-    if (apiBaseUrl)   process.env.EVOLUTION_BASE_URL = apiBaseUrl;
-    if (instanceName) process.env.INSTANCE_NAME      = instanceName;
-    res.json({ success: true });
+// Récupérer groupes/contacts
+app.get('/api/whatsapp/chats', async (req, res) => {
+    if (!waConnected || !waSocket) return res.status(503).json({ error: 'WhatsApp non connecté' });
+    try {
+        const groups = await waSocket.groupFetchAllParticipating();
+        const chats = Object.entries(groups).map(([id, g]) => ({
+            id, name: g.subject || id, isGroup: true, participants: g.participants?.length || 0
+        }));
+        res.json({ success: true, chats });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-// ── Fallback HTML ─────────────────────────────────────────────────────────────
+// Fallback
 app.get('/', (req, res) => {
-    res.sendFile(__dirname + '/index.html');
+    const f = path.join(__dirname, 'index.html');
+    if (fs.existsSync(f)) return res.sendFile(f);
+    res.json({ status: 'KAMOA SCADA API online', whatsapp: waStatus });
 });
 app.use((req, res) => res.status(404).json({ error: 'Route introuvable' }));
 
 // ── Démarrage ─────────────────────────────────────────────────────────────────
 server.listen(PORT, () => {
     console.log(`
-╔════════════════════════════════════════════╗
-║  🚀 KAMOA Control SCADA — Railway          ║
-║  📱 Evolution API + WebSocket QR Push      ║
-║  🌐 Port ${PORT}                              ║
-╚════════════════════════════════════════════╝
-Variables requises dans Railway:
-  EVOLUTION_API_KEY   = votre clé Evolution API
-  EVOLUTION_BASE_URL  = https://votre-evolution.railway.app
-  INSTANCE_NAME       = kamoa-instance-1 (ou votre nom)
-    `);
-
-    // Démarrer le polling automatiquement si les variables sont présentes
-    const { apiKey, apiBaseUrl } = getEvolutionConfig();
-    if (apiKey && apiBaseUrl) {
-        setTimeout(startQrPolling, 3000);
-    } else {
-        console.warn('⚠️  EVOLUTION_API_KEY / EVOLUTION_BASE_URL non définis — polling désactivé');
-    }
+╔══════════════════════════════════════════════════╗
+║  🚀 KAMOA Control SCADA — Railway                ║
+║  📱 WhatsApp Baileys intégré (QR natif)          ║
+║  🌐 https://controlscada-production.up.railway.app ║
+║  🌐 Port: ${PORT}                                   ║
+╚══════════════════════════════════════════════════╝`);
+    // Démarrer WhatsApp automatiquement
+    setTimeout(initWhatsApp, 2000);
 });
 
 module.exports = app;
