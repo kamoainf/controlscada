@@ -24,7 +24,7 @@ const wss    = new WebSocketServer({ server, path: '/ws' });
 const PORT   = process.env.PORT || 8080;
 
 // ── État global WhatsApp ───────────────────────────────────────────────────────
-let waSocket     = null;   // instance Baileys
+let waSocket     = null;
 let waStatus     = 'disconnected';
 let waQrBase64   = null;
 let waConnNumber = null;
@@ -49,7 +49,6 @@ async function initWhatsApp() {
     waInitialized = true;
 
     try {
-        // Import via createRequire pour éviter les soucis ESM
         const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = 
             req('@whiskeysockets/baileys');
 
@@ -65,6 +64,7 @@ async function initWhatsApp() {
 
         const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
 
+        // Options de connexion renforcées
         waSocket = makeWASocket({
             version,
             auth: state,
@@ -72,13 +72,24 @@ async function initWhatsApp() {
             browser: ['KAMOA SCADA', 'Chrome', '1.0'],
             generateHighQualityLinkPreview: false,
             syncFullHistory: false,
+            connectTimeoutMs: 60000,
+            keepAliveIntervalMs: 30000,
+            retryRequestDelayMs: 5000,
+            defaultQueryTimeoutMs: 60000,
+            patchMessageBeforeSending: (msg) => msg,
+            shouldSyncHistoryMessage: () => false,
+            markOnlineOnConnect: false,
+            fireInitQueries: false,
+            getMessage: async () => undefined,
         });
 
-        // ── Événement : QR Code ───────────────────────────────────────────────
+        // ── Événements avec logs détaillés ─────────────────────────────────────
         waSocket.ev.on('connection.update', async (update) => {
+            console.log('📡 connection.update reçu:', Object.keys(update));
             const { connection, lastDisconnect, qr } = update;
 
             if (qr) {
+                console.log('📲 QR Code string reçu (longueur:', qr.length, ')');
                 try {
                     const QRCode = require('qrcode');
                     const qrBase64 = await QRCode.toDataURL(qr, {
@@ -116,7 +127,6 @@ async function initWhatsApp() {
                     waInitialized = false;
                     setTimeout(initWhatsApp, 5000);
                 } else {
-                    // Logged out — supprimer la session
                     fs.rmSync(AUTH_DIR, { recursive: true, force: true });
                     fs.mkdirSync(AUTH_DIR, { recursive: true });
                     waInitialized = false;
@@ -125,10 +135,8 @@ async function initWhatsApp() {
             }
         });
 
-        // ── Sauvegarder credentials ───────────────────────────────────────────
         waSocket.ev.on('creds.update', saveCreds);
 
-        // ── Messages entrants ─────────────────────────────────────────────────
         waSocket.ev.on('messages.upsert', ({ messages }) => {
             messages.forEach(msg => {
                 if (!msg.message) return;
@@ -143,8 +151,12 @@ async function initWhatsApp() {
             });
         });
 
+        waSocket.ev.on('connection.error', (err) => {
+            console.error('❌ connection.error Baileys:', err);
+        });
+
     } catch (err) {
-        console.error('❌ Baileys init error:', err.message);
+        console.error('❌ Baileys init error:', err.message, err.stack);
         waInitialized = false;
         setTimeout(initWhatsApp, 8000);
     }
