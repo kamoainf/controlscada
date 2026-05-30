@@ -47,12 +47,28 @@ async function initWhatsApp() {
 
     try {
         // Import dynamique (Baileys = ESM)
-        const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = 
-            await import('@whiskeysockets/baileys');
-        const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
-        const { version } = await fetchLatestBaileysVersion();
+        const baileys = await import('@whiskeysockets/baileys');
+        
+        // Récupération robuste de makeWASocket
+        const makeWASocket = baileys.default || baileys.makeWASocket;
+        if (!makeWASocket) {
+            throw new Error("makeWASocket introuvable dans le module Baileys");
+        }
 
+        const useMultiFileAuthState = baileys.useMultiFileAuthState;
+        const DisconnectReason = baileys.DisconnectReason;
+        const fetchLatestBaileysVersion = baileys.fetchLatestBaileysVersion;
+
+        let version;
+        if (fetchLatestBaileysVersion) {
+            const v = await fetchLatestBaileysVersion();
+            version = v.version;
+        } else {
+            version = [2, 3000, 1035194821]; // version par défaut stable
+        }
         console.log('📱 Baileys version:', version.join('.'));
+
+        const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
 
         waSocket = makeWASocket({
             version,
