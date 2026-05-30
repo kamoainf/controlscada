@@ -5583,6 +5583,100 @@
         var RAILWAY_API = 'https://controlscada-production.up.railway.app/api';
         var RAILWAY_WS  = 'wss://controlscada-production.up.railway.app/ws';
 
+        // ── WEBSOCKET HUB PERMANENT (messages temps réel) ─────────────
+        var waHubWs = null;
+        var waHubWsRetry = null;
+
+        function waHubConnect() {
+            if (waHubWs && (waHubWs.readyState === WebSocket.OPEN || waHubWs.readyState === WebSocket.CONNECTING)) return;
+            try {
+                waHubWs = new WebSocket(RAILWAY_WS);
+                waHubWs.onopen = function() {
+                    console.log('🟢 WS Hub connecté');
+                    if (waHubWsRetry) { clearTimeout(waHubWsRetry); waHubWsRetry = null; }
+                };
+                waHubWs.onmessage = function(ev) {
+                    try {
+                        var d = JSON.parse(ev.data);
+                        if (d.type === 'message' && d.data) {
+                            waHubHandleMessage(d.data);
+                        } else if (d.type === 'status') {
+                            var strip = document.getElementById('wawConnStrip');
+                            if (strip) strip.style.display = (d.status === 'open') ? 'flex' : 'none';
+                        }
+                    } catch(e) {}
+                };
+                waHubWs.onclose = function() {
+                    console.log('🔴 WS Hub fermé — reconnexion dans 5s');
+                    waHubWsRetry = setTimeout(waHubConnect, 5000);
+                };
+                waHubWs.onerror = function() { waHubWs.close(); };
+            } catch(e) {
+                waHubWsRetry = setTimeout(waHubConnect, 8000);
+            }
+        }
+
+        // ── HANDLER MESSAGE ENTRANT (WebSocket temps réel) ────────────
+        function waHubHandleMessage(data) {
+            // data: { id, from, body, fromMe, ts, pushName }
+            var chatId = data.from || '';
+            if (!chatId) return;
+
+            // Nettoyer l'ID pour l'affichage
+            var num = chatId.replace('@s.whatsapp.net','').replace('@g.us','');
+            var displayName = data.pushName || num;
+
+            // Créer le chat s'il n'existe pas encore
+            var chats = waDB_loadChats();
+            var existing = chats.find(function(c){ return (c.umId||c.phone||c.id) === chatId || c.phone === num; });
+            if (!existing) {
+                chats.push({
+                    id: 'ws_'+Date.now(), umId: chatId, phone: num,
+                    emoji: chatId.indexOf('@g.us') !== -1 ? '👥' : '👤',
+                    name: displayName, isGroup: chatId.indexOf('@g.us') !== -1
+                });
+                waDB_saveChats(chats);
+            } else if (!existing.name || existing.name === existing.phone || existing.name === num) {
+                // Mettre à jour le nom si on a un pushName
+                if (data.pushName) { existing.name = data.pushName; waDB_saveChats(chats); }
+            }
+
+            var ts = data.ts || Math.floor(Date.now()/1000);
+            var d  = new Date(ts * 1000);
+            var entry = {
+                id:       data.id || ('' + ts + chatId),
+                from:     data.pushName || num,
+                body:     data.body || '',
+                fromMe:   !!data.fromMe,
+                ts:       ts,
+                time:     d.toLocaleTimeString('fr-FR', {hour:'2-digit', minute:'2-digit'}),
+                date:     d.toLocaleDateString('fr-FR'),
+                read:     (chatId === wawActiveChatId),
+                delivered:true
+            };
+            waDB_mergeMsgs(chatId, [entry]);
+            wawBuildAllChats();
+            wawRenderChatList();
+            wawUpdateTotalBadge();
+            if (chatId === wawActiveChatId) wawRenderMsgsFromDB();
+            // Notification si pas dans le chat actif
+            if (chatId !== wawActiveChatId && !data.fromMe) {
+                wawShowNotif(entry.from, entry.body);
+            }
+        }
+
+        // ── HELPER: nettoyer un JID en numéro lisible ─────────────────
+        function waJidToNum(jid) {
+            return (jid || '').replace('@s.whatsapp.net','').replace('@g.us','').replace(/[^0-9+]/g,'');
+        }
+
+        // Démarrer le WS hub immédiatement
+        waHubConnect();
+        // Reconnecter si la page revient au premier plan
+        document.addEventListener('visibilitychange', function(){
+            if (!document.hidden) waHubConnect();
+        });
+
         function waActivate(){
             var phone = document.getElementById('waMyPhone').value.trim().replace(/[^+\d]/g,'');
             if (!phone) { toast('Entrez votre numéro WhatsApp (ex: +243...)','var(--amber)'); return; }
@@ -5757,8 +5851,13 @@
                 var cid = g.umId || g.phone || g.id;
                 var last = waDB_lastMsg(cid);
                 var unread = waDB_countUnread(cid);
+                // Nettoyer le nom si c'est un JID brut (@s.whatsapp.net, @g.us)
+                var name = g.name || '';
+                if (!name || name.indexOf('@') !== -1 || name === cid) {
+                    name = waJidToNum(cid) || cid;
+                }
                 chatMap[cid] = {
-                    id: cid, name: g.name, emoji: g.emoji||'👥',
+                    id: cid, name: name, emoji: g.emoji||'👥',
                     lastMsg: last ? last.body : '',
                     lastTime: last ? last.time : '',
                     lastTs: last ? (last.ts||0) : 0,
@@ -5979,24 +6078,22 @@
             inp.style.height = '21px';
             wawRenderMsgsFromDB();
             // Send via Railway/Baileys
-            fetch(RAILWAY_API+'/whatsapp/status').then(function(r){return r.json();}).then(function(ds){
-                if(ds.status==='open'){
-                fetch(RAILWAY_API+'/whatsapp/send',{
-                    method:'POST',
-                    headers:{'Content-Type':'application/json'},
-                    body:JSON.stringify({to:wawActiveChatId, message:msg})
-                }).then(function(r){return r.json();}).then(function(d){
-                    if(d.success||d.data){
-                        var msgs2=waDB_loadMsgs(wawActiveChatId);
-                        var m2=msgs2.find(function(x){return x.id===msgId;});
-                        if(m2){m2.delivered=true; waDB_saveMsgs(wawActiveChatId,msgs2);}
-                        wawRenderMsgsFromDB(); wawBuildAllChats(); wawRenderChatList();
-                    } else { toast('⚠️ Erreur envoi Railway','var(--amber)'); }
-                }).catch(function(){ toast('⚠️ Erreur réseau Railway','var(--amber)'); });
-                } else {
-                    toast('⚠️ WhatsApp non connecté — message non envoyé','var(--amber)');
-                }
-            }).catch(function(){ toast('⚠️ Railway indisponible','var(--amber)'); });
+            // wawActiveChatId peut être un numéro propre ou un JID complet
+            var toJid = wawActiveChatId.indexOf('@') !== -1
+                ? wawActiveChatId
+                : wawActiveChatId.replace(/\D/g,'') + '@s.whatsapp.net';
+            fetch(RAILWAY_API+'/whatsapp/send',{
+                method:'POST',
+                headers:{'Content-Type':'application/json'},
+                body:JSON.stringify({to:toJid, message:msg})
+            }).then(function(r){return r.json();}).then(function(d){
+                if(d.success||d.id){
+                    var msgs2=waDB_loadMsgs(wawActiveChatId);
+                    var m2=msgs2.find(function(x){return x.id===msgId;});
+                    if(m2){m2.delivered=true; waDB_saveMsgs(wawActiveChatId,msgs2);}
+                    wawRenderMsgsFromDB(); wawBuildAllChats(); wawRenderChatList();
+                } else { toast('⚠️ Erreur envoi: '+(d.error||''),'var(--amber)'); }
+            }).catch(function(){ toast('⚠️ Erreur réseau Railway','var(--amber)'); });
         }
         function wawAutoResize(el){
             el.style.height = 'auto';
@@ -6083,49 +6180,47 @@
             document.getElementById('wawQuickBar').style.display = 'none';
         }
 
-        // ── FETCH INBOX (all received messages from API) ──────────
+        // ── FETCH INBOX (tous les messages récents depuis Railway) ───
         function wawFetchInbox(manual){
-            if(!waMyPhone){if(manual)toast('Configurez votre numéro d\'abord','var(--amber)');return;}
-            fetch(RAILWAY_API+'/whatsapp/chats')
+            fetch(RAILWAY_API+'/whatsapp/messages')
                 .then(function(r){return r.json();})
                 .then(function(data){
-                    var msgs = Array.isArray(data)?data:(data.messages||data.data||[]);
-                    var recv = msgs.filter(function(m){return m.fromMe===false||m.fromMe==='false'||m.fromMe===0;});
+                    if(!data.success) { if(manual) toast('⚠️ '+(data.error||'Erreur'),'var(--amber)'); return; }
+                    var summary = data.chats || {};
                     var totalAdded = 0;
-                    // Group by chatId
-                    var byChatId = {};
-                    recv.forEach(function(m){
-                        var cid = m.chatId||m.from||''; if(!cid) return;
-                        if(!byChatId[cid]) byChatId[cid]=[];
-                        byChatId[cid].push({
-                            id: m.id||m._serialized||(''+(m.timestamp||Date.now())+(m.from||'')),
-                            from: m.pushName||m.author||m.from||'?',
-                            body: m.body||m.message||'',
-                            fromMe: false,
-                            ts: m.timestamp||0,
-                            time: m.timestamp?new Date(m.timestamp*1000).toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'}):(m.time||new Date().toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'})),
-                            date: m.timestamp?new Date(m.timestamp*1000).toLocaleDateString('fr-FR'):(m.date||new Date().toLocaleDateString('fr-FR')),
-                            read: false, delivered: true
-                        });
-                    });
-                    // Ensure chats exist & merge messages
                     var chats = waDB_loadChats();
-                    Object.keys(byChatId).forEach(function(cid){
-                        if(!chats.find(function(c){return (c.umId||c.phone||c.id)===cid;})){
-                            chats.push({id:'auto_'+cid, umId:cid, phone:cid, emoji:cid.indexOf('@g.us')!==-1?'👥':'👤',
-                                name:byChatId[cid][0].from||cid, isGroup:cid.indexOf('@g.us')!==-1});
+
+                    Object.keys(summary).forEach(function(cid){
+                        var m = summary[cid];
+                        var num = waJidToNum(cid);
+                        var name = m.pushName || num;
+
+                        // Créer le chat si absent
+                        if(!chats.find(function(c){ return (c.umId||c.phone||c.id)===cid||c.phone===num; })){
+                            chats.push({ id:'api_'+Date.now()+'_'+num, umId:cid, phone:num,
+                                emoji: cid.indexOf('@g.us')!==-1?'👥':'👤',
+                                name: name, isGroup: cid.indexOf('@g.us')!==-1 });
                         }
-                        var added = waDB_mergeMsgs(cid, byChatId[cid]);
+                        var ts = m.ts || 0;
+                        var d2 = ts ? new Date(ts*1000) : new Date();
+                        var entry = {
+                            id: m.id||(''+(ts||Date.now())+cid),
+                            from: name, body: m.body||'', fromMe: !!m.fromMe,
+                            ts: ts,
+                            time: d2.toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'}),
+                            date: d2.toLocaleDateString('fr-FR'),
+                            read: (cid===wawActiveChatId), delivered: true
+                        };
+                        var added = waDB_mergeMsgs(cid, [entry]);
                         totalAdded += added;
-                        if(added > 0) byChatId[cid].slice(0,2).forEach(function(m){ wawShowNotif(m.from, m.body); });
                     });
+
                     waDB_saveChats(chats);
                     wawBuildAllChats(); wawRenderChatList(); wawUpdateTotalBadge();
-                    // Refresh active conv if relevant
-                    if(wawActiveChatId && byChatId[wawActiveChatId]) wawRenderMsgsFromDB();
+                    if(wawActiveChatId) wawRenderMsgsFromDB();
                     if(manual) toast(totalAdded?'✅ '+totalAdded+' nouveau(x) message(s)':'Aucun nouveau message','#25D366');
                 })
-                .catch(function(e){if(manual)toast('⚠️ Erreur inbox: '+e.message,'var(--amber)');});
+                .catch(function(e){ if(manual) toast('⚠️ Erreur inbox: '+e.message,'var(--amber)'); });
         }
 
         

@@ -29,6 +29,22 @@ const server = http.createServer(app);
 const wss    = new WebSocketServer({ server, path: '/ws' });
 const PORT   = process.env.PORT || 8080;
 
+// ── Buffer messages entrants (100 derniers par chatId) ────────────────────────
+const incomingMessages = {};   // { chatId: [ {id, from, body, fromMe, ts, pushName} ] }
+const MAX_MSG_PER_CHAT = 100;
+
+function storeMessage(msg) {
+    const chatId = msg.from;
+    if (!chatId) return;
+    if (!incomingMessages[chatId]) incomingMessages[chatId] = [];
+    // Éviter les doublons
+    if (!incomingMessages[chatId].find(m => m.id === msg.id)) {
+        incomingMessages[chatId].push(msg);
+        if (incomingMessages[chatId].length > MAX_MSG_PER_CHAT)
+            incomingMessages[chatId].shift();
+    }
+}
+
 // ── État global WhatsApp ───────────────────────────────────────────────────────
 let waSocket      = null;
 let waSocketId    = 0;          // incrémenté à chaque nouvelle instance, détecte les sockets périmés
@@ -256,15 +272,26 @@ async function initWhatsApp() {
 
         waSocket.ev.on('creds.update', saveCreds);
 
-        waSocket.ev.on('messages.upsert', ({ messages }) => {
+        waSocket.ev.on('messages.upsert', ({ messages, type }) => {
             for (const msg of messages) {
                 if (!msg.message || msg.message?.protocolMessage) continue;
                 const body = msg.message?.conversation
                           || msg.message?.extendedTextMessage?.text
-                          || '';
+                          || msg.message?.imageMessage?.caption
+                          || msg.message?.videoMessage?.caption
+                          || '[media]';
                 if (!body) continue;
-                const from = msg.key.remoteJid || '';
-                broadcast({ type: 'message', data: { from, body, fromMe: msg.key.fromMe, ts: msg.messageTimestamp } });
+                const chatId   = msg.key.remoteJid || '';
+                const fromMe   = !!msg.key.fromMe;
+                const pushName = msg.pushName || '';
+                const msgId    = msg.key.id || ('' + Date.now());
+                const ts       = typeof msg.messageTimestamp === 'object'
+                                  ? msg.messageTimestamp.low || msg.messageTimestamp.toNumber?.() || Date.now()/1000
+                                  : (msg.messageTimestamp || Date.now()/1000);
+
+                const entry = { id: msgId, from: chatId, body, fromMe, ts, pushName };
+                storeMessage(entry);
+                broadcast({ type: 'message', data: entry });
             }
         });
 
@@ -370,12 +397,32 @@ app.post('/api/whatsapp/send', async (req, res) => {
     if (!to || !message) return res.status(400).json({ error: 'Champs requis: to, message' });
     if (!waConnected || !waSocket) return res.status(503).json({ error: 'WhatsApp non connecté' });
     try {
-        const jid = to.replace(/\D/g, '') + '@s.whatsapp.net';
-        await waSocket.sendMessage(jid, { text: message });
-        res.json({ success: true });
+        const raw = to.replace(/\D/g, '');
+        const jid = raw.includes('@') ? to : raw + '@s.whatsapp.net';
+        const sent = await waSocket.sendMessage(jid, { text: message });
+        // Stocker le message envoyé dans le buffer
+        const ts = Math.floor(Date.now() / 1000);
+        storeMessage({ id: sent?.key?.id || ('' + ts), from: jid, body: message, fromMe: true, ts, pushName: '' });
+        res.json({ success: true, id: sent?.key?.id });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
+});
+
+// Récupérer les messages d'un chat ou tous les chats récents
+app.get('/api/whatsapp/messages', (req, res) => {
+    if (!waConnected) return res.status(503).json({ error: 'WhatsApp non connecté' });
+    const { chatId, limit = 50 } = req.query;
+    if (chatId) {
+        const msgs = (incomingMessages[chatId] || []).slice(-parseInt(limit));
+        return res.json({ success: true, chatId, messages: msgs });
+    }
+    // Retourner tous les chatIds avec leur dernier message
+    const summary = {};
+    Object.entries(incomingMessages).forEach(([cid, msgs]) => {
+        if (msgs.length) summary[cid] = msgs[msgs.length - 1];
+    });
+    res.json({ success: true, chats: summary });
 });
 
 app.post('/api/whatsapp/logout', async (req, res) => {
