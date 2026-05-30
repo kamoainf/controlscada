@@ -1,0 +1,325 @@
+<!--
+  ╔══════════════════════════════════════════════════════════════════╗
+  ║  KAMOA — PATCH WhatsApp QR Code (Evolution API + Railway)       ║
+  ║  À coller juste avant </body> dans index.html                   ║
+  ║  Frontend: https://controlscada.pages.dev/                      ║
+  ║  Backend:  https://controlscada-production.up.railway.app       ║
+  ╚══════════════════════════════════════════════════════════════════╝
+-->
+
+<!-- ═══ MODAL QR CODE WHATSAPP ═══════════════════════════════════════════════ -->
+<div id="waQrModal" style="
+    display:none; position:fixed; inset:0; z-index:9999;
+    background:rgba(0,0,0,.75); backdrop-filter:blur(6px);
+    align-items:center; justify-content:center;">
+  <div style="
+      background:#111b21; border:1px solid #2a3942; border-radius:20px;
+      padding:30px 32px; max-width:380px; width:90%; text-align:center;
+      box-shadow:0 20px 60px rgba(0,0,0,.6);">
+    <!-- Header -->
+    <div style="display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:6px">
+      <i class="fab fa-whatsapp" style="color:#25D366;font-size:26px"></i>
+      <span style="font-family:'Rajdhani',sans-serif;font-size:20px;font-weight:700;color:#e9edef">KAMOA WhatsApp</span>
+    </div>
+    <div style="font-size:11px;color:#8696a0;font-family:monospace;margin-bottom:20px" id="waQrInstanceLabel">
+      Instance: kamoa-instance-1
+    </div>
+
+    <!-- Zone QR -->
+    <div id="waQrBox" style="
+        background:#fff; border-radius:14px; padding:14px;
+        display:inline-flex; align-items:center; justify-content:center;
+        min-width:200px; min-height:200px; margin-bottom:16px; position:relative;">
+      <div id="waQrSpinner" style="text-align:center;color:#555">
+        <div style="font-size:30px;margin-bottom:8px">🔄</div>
+        <div style="font-size:11px;font-family:monospace">Génération du QR…</div>
+      </div>
+      <img id="waQrImg" style="display:none;width:200px;height:200px;border-radius:8px" alt="QR Code WhatsApp">
+    </div>
+
+    <!-- Statut -->
+    <div id="waQrStatus" style="
+        font-family:monospace;font-size:11px;
+        color:#8696a0;margin-bottom:18px;line-height:1.6">
+      Connexion au serveur Railway…
+    </div>
+
+    <!-- Barre de progression QR expiration -->
+    <div style="background:#2a3942;border-radius:4px;height:4px;margin-bottom:18px;overflow:hidden">
+      <div id="waQrProgressBar" style="height:100%;background:#25D366;width:100%;transition:width .5s linear;border-radius:4px"></div>
+    </div>
+
+    <!-- Boutons -->
+    <div style="display:flex;gap:10px;flex-wrap:wrap;justify-content:center">
+      <button onclick="waQrRefresh()" style="
+          background:rgba(37,211,102,.12);border:1px solid rgba(37,211,102,.3);
+          color:#25D366;padding:9px 18px;border-radius:10px;cursor:pointer;
+          font-family:'Rajdhani',sans-serif;font-weight:700;font-size:13px">
+        <i class="fas fa-sync-alt"></i> Actualiser QR
+      </button>
+      <button onclick="waQrModalClose()" style="
+          background:rgba(255,255,255,.06);border:1px solid #2a3942;
+          color:#8696a0;padding:9px 18px;border-radius:10px;cursor:pointer;
+          font-family:'Rajdhani',sans-serif;font-weight:700;font-size:13px">
+        ✕ Fermer
+      </button>
+    </div>
+
+    <!-- Connecté -->
+    <div id="waQrConnected" style="display:none;margin-top:14px">
+      <div style="font-size:36px;margin-bottom:8px">✅</div>
+      <div style="font-family:'Rajdhani',sans-serif;font-size:16px;font-weight:700;color:#25D366">WhatsApp Connecté!</div>
+      <div style="font-size:10px;color:#8696a0;font-family:monospace;margin-top:4px" id="waQrConnPhone"></div>
+      <button onclick="waQrModalClose()" style="
+          margin-top:14px;background:#25D366;border:none;color:#fff;
+          padding:10px 24px;border-radius:10px;cursor:pointer;
+          font-family:'Rajdhani',sans-serif;font-weight:700;font-size:14px">
+        Commencer à utiliser →
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ BOUTON DANS LE HEADER (à placer manuellement si besoin) ══════════════
+  Ajouter dans la div .nav-btns du header :
+  <button class="wa-btn" onclick="waQrModalOpen()" id="waQrHeaderBtn">
+    <i class="fab fa-whatsapp"></i> QR Connect
+  </button>
+══════════════════════════════════════════════════════════════════════════════ -->
+
+<script>
+// ═══ CONFIG RAILWAY BACKEND ════════════════════════════════════════════════════
+var RAILWAY_API  = 'https://controlscada-production.up.railway.app/api';
+var RAILWAY_WS   = 'wss://controlscada-production.up.railway.app/ws';
+
+// ═══ ÉTAT GLOBAL ══════════════════════════════════════════════════════════════
+var waQrWs          = null;
+var waQrWsOpen      = false;
+var waQrProgressT   = null;
+var waQrExpireSec   = 60;
+var waQrSecondsLeft = 60;
+var waQrConnected   = false;
+
+// ═══ OUVRIR / FERMER MODAL ════════════════════════════════════════════════════
+function waQrModalOpen() {
+    document.getElementById('waQrModal').style.display = 'flex';
+    waQrStart();
+}
+function waQrModalClose() {
+    document.getElementById('waQrModal').style.display = 'none';
+    waQrStopProgress();
+}
+
+// ═══ INITIALISATION : appelle /api/whatsapp/init sur Railway ══════════════════
+async function waQrStart() {
+    waQrSetStatus('Initialisation de l\'instance Railway…');
+    try {
+        const r = await fetch(RAILWAY_API + '/whatsapp/init', { method: 'POST' });
+        const d = await r.json();
+        if (!d.success && !d.instanceName) {
+            waQrSetStatus('❌ Erreur init: ' + (d.error || JSON.stringify(d)));
+            return;
+        }
+        document.getElementById('waQrInstanceLabel').textContent = 'Instance: ' + (d.instanceName || 'kamoa-instance-1');
+        waQrSetStatus('Instance prête — connexion WebSocket…');
+        waQrConnectWS();
+    } catch(e) {
+        waQrSetStatus('❌ Impossible de contacter Railway: ' + e.message);
+        // Fallback REST polling si WS non disponible
+        waQrFallbackRest();
+    }
+}
+
+// ═══ WEBSOCKET (temps réel) ════════════════════════════════════════════════════
+function waQrConnectWS() {
+    if (waQrWs) waQrWs.close();
+    try {
+        waQrWs = new WebSocket(RAILWAY_WS);
+
+        waQrWs.onopen = function() {
+            waQrWsOpen = true;
+            waQrSetStatus('WebSocket connecté — en attente du QR…');
+        };
+
+        waQrWs.onmessage = function(ev) {
+            try {
+                var msg = JSON.parse(ev.data);
+                if (msg.type === 'qr') {
+                    waQrShowImage(msg.qr);
+                } else if (msg.type === 'status') {
+                    waQrHandleStatus(msg.status, msg.phone);
+                } else if (msg.type === 'message') {
+                    // Message entrant — mettre à jour le chat si ouvert
+                    if (typeof wawHandleIncoming === 'function') wawHandleIncoming(msg.data);
+                }
+            } catch(_) {}
+        };
+
+        waQrWs.onerror = function() {
+            waQrWsOpen = false;
+            waQrSetStatus('⚠️ WebSocket indisponible — bascule polling REST…');
+            waQrFallbackRest();
+        };
+
+        waQrWs.onclose = function() {
+            waQrWsOpen = false;
+            if (!waQrConnected) {
+                setTimeout(function(){ if(!waQrConnected) waQrConnectWS(); }, 6000);
+            }
+        };
+    } catch(e) {
+        waQrFallbackRest();
+    }
+}
+
+// ═══ FALLBACK REST POLLING (si WS indisponible) ════════════════════════════════
+var waQrRestInterval = null;
+function waQrFallbackRest() {
+    if (waQrRestInterval) return;
+    waQrSetStatus('Polling REST actif (8s)…');
+    waQrFetchRest();
+    waQrRestInterval = setInterval(waQrFetchRest, 8000);
+}
+async function waQrFetchRest() {
+    try {
+        // Status
+        const sr = await fetch(RAILWAY_API + '/whatsapp/status');
+        const sd = await sr.json();
+        if (sd.status === 'open') { waQrHandleStatus('open', sd.phone); return; }
+
+        // QR
+        const qr = await fetch(RAILWAY_API + '/whatsapp/qrcode');
+        const qd = await qr.json();
+        if (qd.qrCode) waQrShowImage(qd.qrCode);
+        else waQrSetStatus('En attente du QR Code… (instance connecting)');
+    } catch(e) {
+        waQrSetStatus('⚠️ Polling: ' + e.message);
+    }
+}
+function waQrStopRestPolling() {
+    if (waQrRestInterval) { clearInterval(waQrRestInterval); waQrRestInterval = null; }
+}
+
+// ═══ AFFICHER QR IMAGE ════════════════════════════════════════════════════════
+function waQrShowImage(base64) {
+    var img = document.getElementById('waQrImg');
+    var spin = document.getElementById('waQrSpinner');
+    var src = base64.startsWith('data:') ? base64 : 'data:image/png;base64,' + base64;
+    img.src = src;
+    img.style.display = 'block';
+    spin.style.display = 'none';
+    waQrSetStatus('📲 Scannez ce QR avec WhatsApp → Menu ⋮ → Appareils connectés → Connecter un appareil');
+    waQrStartProgress();
+}
+
+// ═══ STATUT CONNEXION ════════════════════════════════════════════════════════
+function waQrHandleStatus(status, phone) {
+    if (status === 'open') {
+        waQrConnected = true;
+        waQrStopProgress();
+        waQrStopRestPolling();
+        if (waQrWs) waQrWs.close();
+
+        // Mettre à jour l'interface principale
+        if (phone) {
+            waMyPhone = phone;
+            localStorage.setItem('kmWaPhone', phone);
+        }
+
+        // Afficher écran "connecté"
+        document.getElementById('waQrBox').style.display         = 'none';
+        document.getElementById('waQrStatus').style.display      = 'none';
+        document.getElementById('waQrProgressBar').parentElement.style.display = 'none';
+        document.getElementById('waQrConnected').style.display   = 'block';
+        document.getElementById('waQrConnPhone').textContent     = phone || '';
+
+        // Toast
+        if (typeof toast === 'function') toast('✅ WhatsApp connecté via Railway!', '#25D366');
+
+        // Fermer la modal après 3s
+        setTimeout(waQrModalClose, 3500);
+
+        // Activer le hub WhatsApp principal
+        if (typeof waApplyState === 'function') waApplyState();
+
+    } else if (status === 'connecting') {
+        waQrSetStatus('🔄 WhatsApp en cours de connexion… scannez le QR');
+    } else {
+        waQrSetStatus('🔴 Déconnecté (' + status + ')');
+    }
+}
+
+// ═══ BARRE DE PROGRESSION (QR expire 60s) ════════════════════════════════════
+function waQrStartProgress() {
+    waQrStopProgress();
+    waQrSecondsLeft = waQrExpireSec;
+    waQrProgressT = setInterval(function() {
+        waQrSecondsLeft--;
+        var pct = (waQrSecondsLeft / waQrExpireSec) * 100;
+        document.getElementById('waQrProgressBar').style.width = pct + '%';
+        if (waQrSecondsLeft <= 0) {
+            waQrStopProgress();
+            waQrSetStatus('⏰ QR expiré — actualisation…');
+            waQrRefresh();
+        }
+    }, 1000);
+}
+function waQrStopProgress() {
+    if (waQrProgressT) { clearInterval(waQrProgressT); waQrProgressT = null; }
+}
+
+// ═══ ACTUALISER QR MANUELLEMENT ══════════════════════════════════════════════
+async function waQrRefresh() {
+    document.getElementById('waQrImg').style.display    = 'none';
+    document.getElementById('waQrSpinner').style.display = 'block';
+    document.getElementById('waQrBox').style.display    = 'inline-flex';
+    waQrStopProgress();
+    waQrSetStatus('Rafraîchissement du QR Code…');
+    waQrStopRestPolling();
+    await waQrStart();
+}
+
+// ═══ TEXTE DE STATUT ════════════════════════════════════════════════════════
+function waQrSetStatus(txt) {
+    var el = document.getElementById('waQrStatus');
+    if (el) el.innerHTML = txt;
+}
+
+// ═══ PATCH : Rerouter l'envoi de messages via Railway si connecté ═════════════
+// Remplace les appels UltraMsg par le backend Railway quand connecté via QR
+var _origWaActivate = typeof waActivate === 'function' ? waActivate : null;
+
+// Intégration dans le bouton header si présent
+(function patchHeaderBtn(){
+    var btn = document.getElementById('waQrHeaderBtn');
+    if (!btn) {
+        // Créer automatiquement si header nav-btns existe
+        var nav = document.querySelector('.nav-btns');
+        if (nav) {
+            var b = document.createElement('button');
+            b.className = 'wa-btn';
+            b.id = 'waQrHeaderBtn';
+            b.onclick = waQrModalOpen;
+            b.innerHTML = '<i class="fab fa-whatsapp"></i> QR Connect';
+            nav.insertBefore(b, nav.firstChild);
+        }
+    } else {
+        btn.onclick = waQrModalOpen;
+    }
+})();
+
+// Auto-check statut au démarrage (silencieux)
+(async function waAutoCheck(){
+    try {
+        const r  = await fetch(RAILWAY_API + '/whatsapp/status');
+        const d  = await r.json();
+        if (d.status === 'open' && d.phone) {
+            waConnNumber = d.phone;
+            waMyPhone = d.phone;
+            localStorage.setItem('kmWaPhone', d.phone);
+            if (typeof toast === 'function') toast('📱 WhatsApp actif · ' + d.phone, '#25D366');
+            if (typeof waApplyState === 'function') waApplyState();
+        }
+    } catch(_) {}
+})();
+</script>
