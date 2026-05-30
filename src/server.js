@@ -5,6 +5,12 @@
  * Backend  : https://controlscada-production.up.railway.app/
  */
 
+// ── Polyfill crypto global (requis par Baileys sur Node.js < 19) ───────────────
+const crypto = require('crypto');
+if (!globalThis.crypto) {
+    globalThis.crypto = crypto.webcrypto || crypto;
+}
+
 const express     = require('express');
 const cors        = require('cors');
 const bodyParser  = require('body-parser');
