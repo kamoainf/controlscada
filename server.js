@@ -5,6 +5,9 @@
  * Backend  : https://controlscada-production.up.railway.app/
  */
 
+const { createRequire } = require('node:module');
+const req = createRequire(__filename);
+
 const express     = require('express');
 const cors        = require('cors');
 const bodyParser  = require('body-parser');
@@ -40,32 +43,24 @@ function broadcast(obj) {
 const AUTH_DIR = path.join('/tmp', 'kamoa_auth');
 if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
 
-// ── Initialiser Baileys ───────────────────────────────────────────────────────
+// ── Initialiser Baileys (version robuste avec createRequire) ───────────────────
 async function initWhatsApp() {
     if (waInitialized) return;
     waInitialized = true;
 
     try {
-        // Import dynamique (Baileys = ESM)
-        const baileys = await import('@whiskeysockets/baileys');
-        
-        // Récupération robuste de makeWASocket
-        const makeWASocket = baileys.default || baileys.makeWASocket;
-        if (!makeWASocket) {
-            throw new Error("makeWASocket introuvable dans le module Baileys");
-        }
-
-        const useMultiFileAuthState = baileys.useMultiFileAuthState;
-        const DisconnectReason = baileys.DisconnectReason;
-        const fetchLatestBaileysVersion = baileys.fetchLatestBaileysVersion;
+        // Import via createRequire pour éviter les soucis ESM
+        const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = 
+            req('@whiskeysockets/baileys');
 
         let version;
         if (fetchLatestBaileysVersion) {
             const v = await fetchLatestBaileysVersion();
             version = v.version;
         } else {
-            version = [2, 3000, 1035194821]; // version par défaut stable
+            version = [2, 3000, 1035194821];
         }
+
         console.log('📱 Baileys version:', version.join('.'));
 
         const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
@@ -84,11 +79,10 @@ async function initWhatsApp() {
             const { connection, lastDisconnect, qr } = update;
 
             if (qr) {
-                // Convertir QR string en image base64 via qrcode lib
                 try {
                     const QRCode = require('qrcode');
-                    const qrBase64 = await QRCode.toDataURL(qr, { 
-                        width: 300, 
+                    const qrBase64 = await QRCode.toDataURL(qr, {
+                        width: 300,
                         margin: 2,
                         color: { dark: '#000000', light: '#ffffff' }
                     });
@@ -138,12 +132,12 @@ async function initWhatsApp() {
         waSocket.ev.on('messages.upsert', ({ messages }) => {
             messages.forEach(msg => {
                 if (!msg.message) return;
-                const body = msg.message?.conversation 
-                    || msg.message?.extendedTextMessage?.text 
+                const body = msg.message?.conversation
+                    || msg.message?.extendedTextMessage?.text
                     || '';
                 const from = msg.key.remoteJid || '';
-                broadcast({ 
-                    type: 'message', 
+                broadcast({
+                    type: 'message',
                     data: { from, body, fromMe: msg.key.fromMe, ts: msg.messageTimestamp }
                 });
             });
@@ -189,9 +183,9 @@ wss.on('connection', (ws) => {
 
 // Health
 app.get('/api/health', (req, res) => {
-    res.json({ 
-        status: 'online', 
-        timestamp: new Date(), 
+    res.json({
+        status: 'online',
+        timestamp: new Date(),
         app: 'KAMOA SCADA',
         whatsapp: { status: waStatus, phone: waConnNumber, connected: waConnected }
     });
@@ -285,7 +279,6 @@ server.listen(PORT, () => {
 ║  🌐 https://controlscada-production.up.railway.app ║
 ║  🌐 Port: ${PORT}                                   ║
 ╚══════════════════════════════════════════════════╝`);
-    // Démarrer WhatsApp automatiquement
     setTimeout(initWhatsApp, 2000);
 });
 
