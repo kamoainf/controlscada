@@ -5434,9 +5434,7 @@
         // ===================================================================
         // WHATSAPP MESSAGING SYSTEM v4 — Full Persistent History + Search
         // ===================================================================
-        var ULTRAMSG_INSTANCE = 'instance177958';
-        var ULTRAMSG_TOKEN    = '612tcsx9m4roxkmn';
-        var ULTRAMSG_BASE     = 'https://api.ultramsg.com/' + ULTRAMSG_INSTANCE;
+        // UltraMsg supprimé — tout passe par Railway/Baileys
 
         var waChatOpen = false;
         var waMyPhone  = localStorage.getItem('kmWaPhone') || '';
@@ -5590,25 +5588,17 @@
             if (!phone) { toast('Entrez votre numéro WhatsApp (ex: +243...)','var(--amber)'); return; }
             waMyPhone = phone;
             localStorage.setItem('kmWaPhone', phone);
-            // Try Railway first, fallback to UltraMsg
             fetch(RAILWAY_API+'/whatsapp/status')
                 .then(function(r){return r.json();})
                 .then(function(d){
                     if(d.status==='open'){
                         toast('✅ WhatsApp actif via Railway!','#25D366');
                     } else {
-                        // Fallback: test UltraMsg
-                        fetch(ULTRAMSG_BASE+'/messages/chat',{
-                            method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
-                            body:'token='+ULTRAMSG_TOKEN+'&to='+encodeURIComponent(phone)+'&body='+encodeURIComponent('✅ KAMOA 1 — connecté avec succès!')
-                        }).then(function(r){return r.json();}).then(function(d2){
-                            if(d2.sent==='true'||d2.id){toast('✅ UltraMsg actif! Message test envoyé.','#25D366');}
-                            else{toast('⚠️ UltraMsg: '+(d2.error||JSON.stringify(d2)),'var(--amber)');}
-                        }).catch(function(e){toast('⚠️ Erreur réseau: '+e.message,'var(--amber)');});
+                        toast('⚠️ WhatsApp non connecté — scannez le QR code','var(--amber)');
                     }
                 })
                 .catch(function(){
-                    toast('⚠️ Railway indisponible — UltraMsg actif','var(--amber)');
+                    toast('⚠️ Railway indisponible — vérifiez le serveur','var(--amber)');
                 });
             waApplyState();
         }
@@ -5935,7 +5925,7 @@
             if (!wawActiveChatId) return;
             var icon = document.getElementById('wawConvSyncIcon');
             if (icon) icon.style.animation = 'spin 1s linear infinite';
-            fetch(ULTRAMSG_BASE+'/chats/'+encodeURIComponent(wawActiveChatId)+'/messages?token='+ULTRAMSG_TOKEN+'&limit=100')
+            fetch(RAILWAY_API+'/whatsapp/chats')
                 .then(function(r){return r.json();})
                 .then(function(data){
                     if(icon) icon.style.animation='';
@@ -5988,13 +5978,9 @@
             inp.value = '';
             inp.style.height = '21px';
             wawRenderMsgsFromDB();
-            // Send via Railway (Evolution API) if connected, else UltraMsg fallback
-            var railwaySend = false;
+            // Send via Railway/Baileys
             fetch(RAILWAY_API+'/whatsapp/status').then(function(r){return r.json();}).then(function(ds){
-                railwaySend = (ds.status==='open');
-            }).catch(function(){});
-
-            if(railwaySend){
+                if(ds.status==='open'){
                 fetch(RAILWAY_API+'/whatsapp/send',{
                     method:'POST',
                     headers:{'Content-Type':'application/json'},
@@ -6007,25 +5993,10 @@
                         wawRenderMsgsFromDB(); wawBuildAllChats(); wawRenderChatList();
                     } else { toast('⚠️ Erreur envoi Railway','var(--amber)'); }
                 }).catch(function(){ toast('⚠️ Erreur réseau Railway','var(--amber)'); });
-            } else {
-            // Send via UltraMsg
-            fetch(ULTRAMSG_BASE+'/messages/chat',{
-                method:'POST',
-                headers:{'Content-Type':'application/x-www-form-urlencoded'},
-                body:'token='+ULTRAMSG_TOKEN+'&to='+encodeURIComponent(wawActiveChatId)+'&body='+encodeURIComponent(msg)
-            }).then(function(r){return r.json();}).then(function(d){
-                if(d.sent==='true'||d.id){
-                    // Mark as delivered
-                    var msgs = waDB_loadMsgs(wawActiveChatId);
-                    var m = msgs.find(function(x){return x.id===msgId;});
-                    if(m){ m.delivered=true; if(d.id) m.id=d.id; waDB_saveMsgs(wawActiveChatId, msgs); }
-                    wawRenderMsgsFromDB();
-                    wawBuildAllChats(); wawRenderChatList();
                 } else {
-                    toast('⚠️ Erreur envoi: '+(d.error||''),'var(--amber)');
+                    toast('⚠️ WhatsApp non connecté — message non envoyé','var(--amber)');
                 }
-            }).catch(function(){ toast('⚠️ Erreur réseau','var(--amber)'); });
-            } // end else UltraMsg fallback
+            }).catch(function(){ toast('⚠️ Railway indisponible','var(--amber)'); });
         }
         function wawAutoResize(el){
             el.style.height = 'auto';
@@ -6115,7 +6086,7 @@
         // ── FETCH INBOX (all received messages from API) ──────────
         function wawFetchInbox(manual){
             if(!waMyPhone){if(manual)toast('Configurez votre numéro d\'abord','var(--amber)');return;}
-            fetch(ULTRAMSG_BASE+'/messages?token='+ULTRAMSG_TOKEN+'&page=1&limit=100&status=&sort=desc')
+            fetch(RAILWAY_API+'/whatsapp/chats')
                 .then(function(r){return r.json();})
                 .then(function(data){
                     var msgs = Array.isArray(data)?data:(data.messages||data.data||[]);
@@ -6157,7 +6128,7 @@
                 .catch(function(e){if(manual)toast('⚠️ Erreur inbox: '+e.message,'var(--amber)');});
         }
 
-        // ── LOAD GROUPS / CONTACTS FROM ULTRAMSG ─────────────────
+        
         // ── NOTIFICATIONS ─────────────────────────────────────────
         function waRequestNotif(){
             if(!('Notification' in window)){toast('⚠️ Navigateur ne supporte pas les notifications','var(--amber)');return;}
@@ -6225,92 +6196,63 @@
             } catch(e){}
         })();
 
-        // ── LOAD GROUPS / CONTACTS FROM ULTRAMSG ─────────────────
+        
         function waLoadFromUltraMsg(){
+            // Renommée waLoadChats() en interne — charge groupes/contacts depuis Railway/Baileys
             var icons=[document.getElementById('waLoadIcon'),document.getElementById('waLoadIcon2')];
             icons.forEach(function(i){if(i)i.style.animation='spin 1s linear infinite';});
 
-            // UltraMsg returns: { groups: [...] } or plain array
-            // Groups fields: id (e.g. 123@g.us), name/subject, participants
-            // Contacts fields: id (e.g. 243...@c.us), name/pushname/notify, number
-            var pG = fetch(ULTRAMSG_BASE+'/groups?token='+ULTRAMSG_TOKEN)
-                .then(function(r){return r.json();}).catch(function(){return {};});
-            var pC = fetch(ULTRAMSG_BASE+'/contacts?token='+ULTRAMSG_TOKEN)
-                .then(function(r){return r.json();}).catch(function(){return {};});
-
-            Promise.all([pG, pC]).then(function(res){
-                icons.forEach(function(i){if(i)i.style.animation='';});
-
-                // Normalize response — UltraMsg may return array or {groups:[...]} or {contacts:[...]}
-                var rawGroups   = Array.isArray(res[0]) ? res[0] : (res[0].groups || res[0].data || []);
-                var rawContacts = Array.isArray(res[1]) ? res[1] : (res[1].contacts || res[1].data || []);
-
-                var saved = waDB_loadChats();
-                var added = 0;
-
-                rawGroups.forEach(function(g){
-                    // UltraMsg group id format: "1234567890@g.us" or similar
-                    var id = g.id || g.chatId || g._serialized || '';
-                    if (!id) return;
-                    var name = g.name || g.subject || g.pushname || id;
-                    // Check if already exists by umId or phone
-                    var exists = saved.find(function(x){
-                        return x.umId === id || x.phone === id;
-                    });
-                    if (!exists) {
-                        saved.push({
-                            id: 'um_'+Date.now()+'_'+Math.random().toString(36).slice(2,7),
-                            umId: id, phone: id,
-                            emoji: '👥', name: name,
-                            desc: 'Groupe WhatsApp', isGroup: true
-                        });
-                        added++;
-                    } else {
-                        // Update name if it changed
-                        exists.name = name || exists.name;
-                        exists.umId = id;
+            fetch(RAILWAY_API+'/whatsapp/chats')
+                .then(function(r){return r.json();})
+                .then(function(res){
+                    icons.forEach(function(i){if(i)i.style.animation='';});
+                    if(!res.success){
+                        toast('⚠️ '+(res.error||'Erreur Railway'),'var(--amber)');
+                        return;
                     }
-                });
+                    var rawGroups   = res.groups   || [];
+                    var rawContacts = res.contacts  || [];
+                    var saved = waDB_loadChats();
+                    var added = 0;
 
-                rawContacts.forEach(function(ct){
-                    // UltraMsg contact id: "243812345678@c.us" or number "243812345678"
-                    var id   = ct.id || ct._serialized || '';
-                    var num  = ct.number || ct.phone || (id.replace('@c.us','')) || '';
-                    var name = ct.name || ct.pushname || ct.notify || ct.shortName || num;
-                    // Skip groups and contacts without a real name
-                    if (!num) return;
-                    if (id.indexOf('@g.us') !== -1) return;
-                    if (!name || name === num || name === id) return;
-                    var cid = id || num; // use @c.us form if available
-                    var exists = saved.find(function(x){
-                        return x.umId === cid || x.phone === cid || x.phone === num || x.umId === num;
+                    rawGroups.forEach(function(g){
+                        var id   = g.id || '';
+                        if(!id) return;
+                        var name = g.name || g.subject || id;
+                        var exists = saved.find(function(x){ return x.umId===id||x.phone===id; });
+                        if(!exists){
+                            saved.push({ id:'wa_'+Date.now()+'_'+Math.random().toString(36).slice(2,7),
+                                umId:id, phone:id, emoji:'👥', name:name,
+                                desc:'Groupe WhatsApp', isGroup:true });
+                            added++;
+                        } else { exists.name=name||exists.name; exists.umId=id; }
                     });
-                    if (!exists) {
-                        saved.push({
-                            id: 'um_'+Date.now()+'_'+Math.random().toString(36).slice(2,7),
-                            umId: cid, phone: cid,
-                            emoji: '👤', name: name,
-                            desc: num, isGroup: false
-                        });
-                        added++;
+
+                    rawContacts.forEach(function(ct){
+                        var id   = ct.id || '';
+                        var num  = ct.id ? ct.id.replace('@s.whatsapp.net','') : '';
+                        var name = ct.name || num;
+                        if(!num||!name||name===num) return;
+                        var exists = saved.find(function(x){ return x.umId===id||x.phone===num; });
+                        if(!exists){
+                            saved.push({ id:'wa_'+Date.now()+'_'+Math.random().toString(36).slice(2,7),
+                                umId:id, phone:num, emoji:'👤', name:name,
+                                desc:num, isGroup:false });
+                            added++;
+                        } else { exists.name=name||exists.name; }
+                    });
+
+                    waDB_saveChats(saved);
+                    wawBuildAllChats(); wawRenderChatList(); wawUpdateTotalBadge();
+                    if(rawGroups.length===0 && rawContacts.length===0){
+                        toast('⚠️ Aucun groupe/contact — WhatsApp connecté?','var(--amber)');
                     } else {
-                        exists.name = name || exists.name;
-                        exists.umId = cid || exists.umId;
+                        toast('✅ '+rawGroups.length+' groupes · '+rawContacts.length+' contacts (+'+added+' ajoutés)','#25D366');
                     }
+                }).catch(function(e){
+                    icons.forEach(function(i){if(i)i.style.animation='';});
+                    toast('⚠️ Erreur Railway: '+e.message,'var(--amber)');
                 });
-
-                waDB_saveChats(saved);
-                wawBuildAllChats(); wawRenderChatList(); wawUpdateTotalBadge();
-                toast('✅ '+rawGroups.length+' groupes · '+rawContacts.length+' contacts (+'+added+' ajoutés)','#25D366');
-
-                // Debug: show raw count if 0
-                if(rawGroups.length===0 && rawContacts.length===0){
-                    toast('⚠️ API: aucun groupe/contact reçu — vérifiez instance & token','var(--amber)');
-                }
-            }).catch(function(e){
-                icons.forEach(function(i){if(i)i.style.animation='';});
-                toast('⚠️ Erreur UltraMsg: '+e.message,'var(--amber)');
-            });
         }
 
         // ── NOTIFICATIONS ─────────────────────────────────────────
@@ -6647,7 +6589,7 @@
                     <div class="wa-act-num">2</div>
                     <div class="wa-act-ct">
                         <div class="wa-act-ct-title">Ou entrez votre numéro manuellement</div>
-                        <div style="font-size:10px;color:#8696a0;font-family:var(--mono);margin-bottom:8px">Fallback UltraMsg · ex: +243812345678</div>
+                        <div style="font-size:10px;color:#8696a0;font-family:var(--mono);margin-bottom:8px">Via Railway · ex: +243812345678</div>
                         <input class="wa-inp-field" id="waMyPhone" placeholder="+243812345678" type="tel">
                         <button class="wa-act-submit" onclick="waActivate()">
                             <i class="fab fa-whatsapp"></i> Connecter manuellement
@@ -6667,7 +6609,7 @@
                     <div class="waw-sb-avatar">💬</div>
                     <span class="waw-sb-title">KAMOA Hub</span>
                     <span id="wawUnreadTotal" style="font-size:9px;color:#25D366;font-family:var(--mono);margin-right:2px"></span>
-                    <button class="waw-sb-icon-btn" onclick="waLoadFromUltraMsg()" title="Synchroniser UltraMsg"><i class="fas fa-sync-alt" id="waLoadIcon"></i></button>
+                    <button class="waw-sb-icon-btn" onclick="waLoadFromUltraMsg()" title="Synchroniser groupes/contacts"><i class="fas fa-sync-alt" id="waLoadIcon"></i></button>
                     <button class="waw-sb-icon-btn" onclick="waRequestNotif()" title="Notifications" id="waNotifIconBtn">🔔</button>
                     <button class="waw-sb-icon-btn" onclick="waDisconnect()" title="Déconnecter" style="font-size:13px">⏻</button>
                 </div>
