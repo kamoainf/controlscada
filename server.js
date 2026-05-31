@@ -51,25 +51,37 @@ async function initWhatsApp() {
         const { Client, LocalAuth } = require('whatsapp-web.js');
         const QRCode = require('qrcode');
 
+        // Utiliser Chromium système (défini dans Dockerfile via PUPPETEER_EXECUTABLE_PATH)
+        const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium';
+
         waClient = new Client({
             authStrategy: new LocalAuth({ dataPath: '/tmp/kamoa_auth' }),
             puppeteer: {
                 headless: true,
+                executablePath,
                 args: [
                     '--no-sandbox',
                     '--disable-setuid-sandbox',
                     '--disable-dev-shm-usage',
-                    '--disable-gpu'
+                    '--disable-gpu',
+                    '--disable-software-rasterizer',
+                    '--disable-extensions',
+                    '--no-first-run',
+                    '--single-process',
+                    '--no-zygote'
                 ]
             }
         });
 
+        let qrCount = 0;
         waClient.on('qr', async (qr) => {
+            qrCount++;
             waQr    = await QRCode.toDataURL(qr);
             waStatus = 'qr';
             io.emit('whatsapp_qr',     { qr: waQr });
             io.emit('whatsapp_status', { status: waStatus });
-            console.log('📱 QR Code généré — scannez avec WhatsApp');
+            console.log(\`📱 QR #\${qrCount} généré — scannez MAINTENANT (expire dans ~20s)\`);
+            if (qrCount >= 5) console.warn('⚠️  5 QR générés sans scan — vérifiez que vous scannez le QR affiché dans la page');
         });
 
         waClient.on('ready', () => {

@@ -5789,7 +5789,7 @@
             if(waActQrRestPoll) return;
             waActQrSetSpinner('Polling REST actif…');
             waActQrFetchRest();
-            waActQrRestPoll = setInterval(waActQrFetchRest, 8000);
+            waActQrRestPoll = setInterval(waActQrFetchRest, 5000); // QR change toutes les ~20s
         }
         function waActQrFetchRest(){
             fetch(RAILWAY_API+'/whatsapp/status').then(function(r){return r.json();}).then(function(d){
@@ -5825,25 +5825,29 @@
         }
         function waActQrStartProgress(){
             waActQrStopProgress();
-            waActQrSecondsLeft = 60;
+            waActQrSecondsLeft = 20; // QR WhatsApp expire toutes les ~20s
             waActQrTimer = setInterval(function(){
                 waActQrSecondsLeft--;
-                var pct = (waActQrSecondsLeft/60)*100;
+                var pct = (waActQrSecondsLeft/20)*100;
                 var bar = document.getElementById('waActQrBar');
                 if(bar) bar.style.width = pct+'%';
                 var exp = document.getElementById('waActQrExpiry');
-                if(exp) exp.textContent = 'Expire dans '+waActQrSecondsLeft+'s';
-                if(waActQrSecondsLeft<=0){ waActQrStopProgress(); waActQrRefresh(); }
+                if(exp) exp.textContent = 'Nouveau QR dans '+waActQrSecondsLeft+'s';
+                if(waActQrSecondsLeft<=0){ waActQrStopProgress(); waActQrSetSpinner('Nouveau QR en cours…'); }
             },1000);
         }
         function waActQrStopProgress(){ if(waActQrTimer){clearInterval(waActQrTimer);waActQrTimer=null;} }
         function waActQrRefresh(){
             var img=document.getElementById('waActQrImg');
             var spin=document.getElementById('waActQrSpinner');
-            img.style.display='none'; spin.style.display='block';
-            waActQrSetSpinner('Rafraîchissement QR…');
-            waActQrStopProgress(); waActQrStopRest(); waActQrDone=false;
-            waActQrInit();
+            if(img)  img.style.display='none';
+            if(spin) spin.style.display='block';
+            waActQrSetSpinner('En attente du nouveau QR…');
+            waActQrStopProgress();
+            waActQrDone = false;
+            // Ne PAS appeler waActQrInit() — le serveur génère automatiquement un nouveau QR
+            // On attend via Socket.IO + REST poll déjà actif
+            if(!waActQrRestPoll) waActQrFallbackRest();
         }
         function waActQrSetSpinner(txt){
             var sp=document.getElementById('waActQrSpinTxt');
