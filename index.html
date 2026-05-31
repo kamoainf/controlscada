@@ -5579,9 +5579,9 @@
                 if (waMyPhone) document.getElementById('waMyPhone').value = waMyPhone;
             }
         }
-        // ── RAILWAY CONFIG ────────────────────────────────────────────
-        var RAILWAY_API = 'https://controlscada-production.up.railway.app/api';
-        var RAILWAY_WS  = 'https://controlscada-production.up.railway.app';
+        // ── SERVER CONFIG (dynamique — fonctionne sur Northflank, Railway, local) ──
+        var RAILWAY_API = window.location.origin + '/api';
+        var RAILWAY_WS  = window.location.origin;
 
         // ── SOCKET.IO HUB PERMANENT (messages temps réel) ─────────────
         var waSocket = null;
@@ -7839,8 +7839,7 @@ function convClearAll(){if(!confirm('Effacer toutes les données Conveyors?'))re
             const cutMs = cutoff.getTime();
             const removed = history.filter(e => e.id && e.id < cutMs && e.status !== 'active').length;
             if (!removed) { toast('ℹ️ Nothing to purge (all data < 30 days old)', 'var(--blue)'); return; }
-            if (!confirm('Purge ' + removed + ' entries older than ' + DAYS + ' days?
-(Active faults will be kept regardless)')) return;
+            if (!confirm('Purge ' + removed + ' entries older than ' + DAYS + ' days?\n(Active faults will be kept regardless)')) return;
             history = history.filter(e => !e.id || e.id >= cutMs || e.status === 'active');
             saveHistory();
             renderActiveList();
