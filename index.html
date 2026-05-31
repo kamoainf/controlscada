@@ -5617,9 +5617,20 @@
                 waSocket.on('whatsapp_qr', function(d) {
                     if (d.qr) {
                         waQrBase64 = d.qr;
-                        var img = document.getElementById('waActQrImg');
-                        if (img) img.src = d.qr;
-                        document.getElementById('waActScreen') && document.getElementById('waActScreen').classList.remove('hidden');
+                        // Afficher la carte QR et l'écran
+                        var screen = document.getElementById('waActScreen');
+                        var card   = document.getElementById('waActQrCard');
+                        if (screen) screen.classList.remove('hidden');
+                        if (card)   card.style.display = 'block';
+                        // Utiliser waActQrShowImg qui gère spinner + image correctement
+                        if (typeof waActQrShowImg === 'function') {
+                            waActQrShowImg(d.qr);
+                        } else {
+                            var img = document.getElementById('waActQrImg');
+                            var spin = document.getElementById('waActQrSpinner');
+                            if (img)  { img.src = d.qr; img.style.display = 'block'; }
+                            if (spin) spin.style.display = 'none';
+                        }
                     }
                 });
 
@@ -5785,7 +5796,7 @@
                 if(d.status==='connected'||d.status==='open'){ waActQrHandleStatus('open', d.phone||d.info?.wid?.user); return; }
             }).catch(function(){});
             fetch(RAILWAY_API+'/whatsapp/qrcode').then(function(r){return r.json();}).then(function(d){
-                if(d.qrCode) waActQrShowImg(d.qrCode);
+                if(d.qr || d.qrCode) waActQrShowImg(d.qr || d.qrCode);
                 else waActQrSetSpinner('En attente QR… (instance connecting)');
             }).catch(function(){});
         }
