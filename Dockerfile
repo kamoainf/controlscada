@@ -2,9 +2,13 @@ FROM node:20
 
 WORKDIR /app
 
-# Installer dépendances système (Chrome/WhatsApp)
+# ─────────────────────────────────────────────
+# 🔧 SYSTEM DEPENDENCIES (WhatsApp + Puppeteer)
+# ─────────────────────────────────────────────
 RUN apt-get update && apt-get install -y \
-    gconf-service \
+    chromium \
+    ca-certificates \
+    fonts-liberation \
     libasound2 \
     libatk1.0-0 \
     libc6 \
@@ -33,23 +37,28 @@ RUN apt-get update && apt-get install -y \
     libxrender1 \
     libxss1 \
     libxtst6 \
-    ca-certificates \
-    fonts-liberation \
-    wget \
     xdg-utils \
+    wget \
     -y
 
-# Copier package files
+# ─────────────────────────────────────────────
+# 📦 INSTALL NODE DEPENDENCIES
+# ─────────────────────────────────────────────
 COPY package*.json ./
 
-# IMPORTANT FIX (corrige ton erreur npm ci)
-RUN npm install
+RUN npm install 
 
-# Copier le reste du projet
+# ─────────────────────────────────────────────
+# 📁 COPY PROJECT FILES
+# ─────────────────────────────────────────────
 COPY . .
 
-# Port Render/Northflank
+# ─────────────────────────────────────────────
+# 🌐 PORT
+# ─────────────────────────────────────────────
 EXPOSE 3000
 
-# Démarrage
+# ─────────────────────────────────────────────
+# 🚀 START APP
+# ─────────────────────────────────────────────
 CMD ["npm", "start"]
