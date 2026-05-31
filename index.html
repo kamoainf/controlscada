@@ -5579,7 +5579,7 @@
                 if (waMyPhone) document.getElementById('waMyPhone').value = waMyPhone;
             }
         }
-        // ── SERVER CONFIG (dynamique — fonctionne sur Northflank, Railway, local) ──
+        // ── SERVER CONFIG (dynamique — Northflank / Railway / local) ────
         var RAILWAY_API = window.location.origin + '/api';
         var RAILWAY_WS  = window.location.origin;
 
@@ -5592,7 +5592,7 @@
             var script = document.createElement('script');
             script.src = RAILWAY_WS + '/socket.io/socket.io.js';
             script.onload = function() {
-                waSocket = io(RAILWAY_WS, { transports: ['websocket','polling'], reconnection: true, reconnectionDelay: 3000 });
+                waSocket = io(RAILWAY_WS, { transports: ['polling','websocket'], reconnection: true, reconnectionDelay: 3000, reconnectionAttempts: 10 });
 
                 waSocket.on('connect', function() {
                     console.log('🟢 Socket.IO connecté');
@@ -5642,30 +5642,14 @@
                 });
             };
             script.onerror = function() {
-                // Fallback WebSocket natif si Socket.IO non disponible
-                console.warn('Socket.IO indisponible — fallback WS');
-                waHubConnectWsNatif();
+                console.warn('Socket.IO indisponible');
             };
             document.head.appendChild(script);
         }
 
-        // Fallback WebSocket natif (ancien server Baileys)
+        // WebSocket natif supprimé — Socket.IO gère tout (compatible Northflank)
         var waHubWs = null, waHubWsRetry = null;
-        function waHubConnectWsNatif() {
-            var wsUrl = RAILWAY_WS.replace('https://','wss://').replace('http://','ws://') + '/ws';
-            if (waHubWs && (waHubWs.readyState === 0 || waHubWs.readyState === 1)) return;
-            try {
-                waHubWs = new WebSocket(wsUrl);
-                waHubWs.onmessage = function(ev) {
-                    try {
-                        var d = JSON.parse(ev.data);
-                        if (d.type === 'message' && d.data) waHubHandleMessage(d.data);
-                    } catch(e) {}
-                };
-                waHubWs.onclose = function() { waHubWsRetry = setTimeout(waHubConnectWsNatif, 5000); };
-                waHubWs.onerror = function() { waHubWs.close(); };
-            } catch(e) { waHubWsRetry = setTimeout(waHubConnectWsNatif, 8000); }
-        }
+        function waHubConnectWsNatif() { /* désactivé */ }
 
         // ── HANDLER MESSAGE ENTRANT (WebSocket temps réel) ────────────
         function waHubHandleMessage(data) {
@@ -5777,22 +5761,17 @@
         }
 
         function waActQrConnectWS(){
-            try {
-                if(waActQrWs) waActQrWs.close();
-                waActQrWs = new WebSocket(RAILWAY_WS);
-                waActQrWs.onopen = function(){ waActQrSetSpinner('WebSocket OK — attente QR…'); };
-                waActQrWs.onmessage = function(ev){
-                    try {
-                        var msg = JSON.parse(ev.data);
-                        if(msg.type==='qr')     waActQrShowImg(msg.qr);
-                        else if(msg.type==='status') waActQrHandleStatus(msg.status, msg.phone);
-                    } catch(_){}
-                };
-                waActQrWs.onerror = function(){ waActQrFallbackRest(); };
-                waActQrWs.onclose = function(){
-                    if(!waActQrDone) setTimeout(function(){ if(!waActQrDone) waActQrConnectWS(); }, 6000);
-                };
-            } catch(e){ waActQrFallbackRest(); }
+            // Socket.IO uniquement — WebSocket natif supprimé (incompatible Northflank)
+            waActQrSetSpinner('En attente QR…');
+            if (typeof io !== 'undefined') {
+                waHubConnect();
+            } else {
+                var s = document.createElement('script');
+                s.src = RAILWAY_WS + '/socket.io/socket.io.js';
+                s.onload = function(){ waHubConnect(); };
+                document.head.appendChild(s);
+            }
+            waActQrFallbackRest();
         }
 
         function waActQrFallbackRest(){
@@ -5803,7 +5782,7 @@
         }
         function waActQrFetchRest(){
             fetch(RAILWAY_API+'/whatsapp/status').then(function(r){return r.json();}).then(function(d){
-                if(d.status==='open'){ waActQrHandleStatus('open', d.phone); return; }
+                if(d.status==='connected'||d.status==='open'){ waActQrHandleStatus('open', d.phone||d.info?.wid?.user); return; }
             }).catch(function(){});
             fetch(RAILWAY_API+'/whatsapp/qrcode').then(function(r){return r.json();}).then(function(d){
                 if(d.qrCode) waActQrShowImg(d.qrCode);
