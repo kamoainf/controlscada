@@ -2,13 +2,7 @@ FROM node:20
 
 WORKDIR /app
 
-COPY package*.json ./
-
-RUN npm install
-
-COPY . .
-
-# dépendances Chrome pour whatsapp-web.js
+# Installer dépendances système (Chrome/WhatsApp)
 RUN apt-get update && apt-get install -y \
     gconf-service \
     libasound2 \
@@ -20,8 +14,6 @@ RUN apt-get update && apt-get install -y \
     libexpat1 \
     libfontconfig1 \
     libgcc1 \
-    libgconf-2-4 \
-    libgdk-pixbuf2.0-0 \
     libglib2.0-0 \
     libgtk-3-0 \
     libnspr4 \
@@ -44,8 +36,20 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     fonts-liberation \
     wget \
-    xdg-utils -y
+    xdg-utils \
+    -y
 
+# Copier package files
+COPY package*.json ./
+
+# IMPORTANT FIX (corrige ton erreur npm ci)
+RUN npm install
+
+# Copier le reste du projet
+COPY . .
+
+# Port Render/Northflank
 EXPOSE 3000
 
+# Démarrage
 CMD ["npm", "start"]
