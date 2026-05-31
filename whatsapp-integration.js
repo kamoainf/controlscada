@@ -44,7 +44,7 @@ class WhatsAppIntegration {
     // ─────────────────────────────
     async fetchStatus() {
         try {
-            const res = await fetch(`${this.baseUrl}/api/health`);
+            const res = await fetch(`${this.baseUrl}/api/whatsapp/status`);
             const data = await res.json();
 
             if (data?.whatsapp) {
@@ -62,7 +62,7 @@ class WhatsAppIntegration {
     // ─────────────────────────────
     async fetchQR() {
         try {
-            const res = await fetch(`${this.baseUrl}/api/qrcode`);
+            const res = await fetch(`${this.baseUrl}/api/whatsapp/qrcode`);
             const data = await res.json();
 
             if (data?.qr) {
@@ -80,7 +80,7 @@ class WhatsAppIntegration {
     // ─────────────────────────────
     async sendMessage(number, message) {
         try {
-            const res = await fetch(`${this.baseUrl}/api/send`, {
+            const res = await fetch(`${this.baseUrl}/api/whatsapp/send`, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json"
