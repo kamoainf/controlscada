@@ -5599,16 +5599,34 @@
                 });
 
                 waSocket.on('whatsapp_status', function(d) {
-                    var strip = document.getElementById('wawConnStrip');
+                    var strip    = document.getElementById('wawConnStrip');
+                    var qrCard   = document.getElementById('waActQrCard');
+                    var connCard = document.getElementById('waActConnCard');
                     if (d.status === 'connected') {
+                        // Barre de statut
                         if (strip) strip.style.display = 'flex';
                         var ph = document.getElementById('waConnPhone');
-                        if (ph && d.phone) ph.textContent = '+' + d.phone + (d.name ? ' · ' + d.name : '');
-                        // Charger les chats automatiquement à la connexion
-                        if (!waMyPhone) { waMyPhone = '+'+d.phone; localStorage.setItem('kmWaPhone', waMyPhone); waApplyState(); }
-                        waLoadFromUltraMsg();
+                        // Extraire le numéro depuis waInfo si disponible
+                        var phone = d.phone || (d.info && d.info.wid && d.info.wid.user) || '';
+                        var name  = d.name  || (d.info && d.info.pushname) || '';
+                        if (ph && phone) ph.textContent = '+' + phone + (name ? ' · ' + name : '');
+                        // Cacher carte QR, montrer carte connecté
+                        if (qrCard)   qrCard.style.display   = 'none';
+                        if (connCard) connCard.style.display  = 'block';
+                        var connPhone = document.getElementById('waActConnPhone');
+                        if (connPhone) connPhone.textContent = phone || 'Connecté';
+                        // Persistance + chargement chats
+                        if (!waMyPhone && phone) {
+                            waMyPhone = '+' + phone;
+                            localStorage.setItem('kmWaPhone', waMyPhone);
+                            waApplyState();
+                        }
+                        waActQrDone = true;
+                        waActQrStopProgress();
+                        waActQrStopRest();
                     } else if (d.status === 'qr') {
-                        if (strip) strip.style.display = 'none';
+                        if (strip)    strip.style.display    = 'none';
+                        if (connCard) connCard.style.display = 'none';
                     } else {
                         if (strip) strip.style.display = 'none';
                     }
@@ -5812,14 +5830,17 @@
             waActQrStartProgress();
         }
         function waActQrHandleStatus(status, phone){
-            if(status==='open'){
+            if(status==='open' || status==='connected'){
                 waActQrDone = true;
                 waActQrStopProgress(); waActQrStopRest();
-                if(waActQrWs) waActQrWs.close();
                 if(phone){ waMyPhone=phone; localStorage.setItem('kmWaPhone',phone); }
-                document.getElementById('waActQrCard').style.display   = 'none';
-                document.getElementById('waActConnCard').style.display  = 'block';
-                document.getElementById('waActConnPhone').textContent   = phone||'';
+                // Cacher QR, montrer carte connecté
+                var qrCard   = document.getElementById('waActQrCard');
+                var connCard = document.getElementById('waActConnCard');
+                var connPhone= document.getElementById('waActConnPhone');
+                if(qrCard)    qrCard.style.display   = 'none';
+                if(connCard)  connCard.style.display  = 'block';
+                if(connPhone) connPhone.textContent   = phone||'Connecté';
                 toast('✅ WhatsApp connecté!','#25D366');
             }
         }

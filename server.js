@@ -88,8 +88,15 @@ async function initWhatsApp() {
             waStatus = 'connected';
             waQr     = null;
             waInfo   = waClient.info;
-            console.log('✅ WhatsApp CONNECTÉ 🚀');
-            io.emit('whatsapp_status', { status: 'connected', info: waInfo });
+            const phone = waInfo?.wid?.user || '';
+            const name  = waInfo?.pushname  || '';
+            console.log(`✅ WhatsApp CONNECTÉ — ${phone} (${name})`);
+            io.emit('whatsapp_status', {
+                status: 'connected',
+                phone,
+                name,
+                info: waInfo
+            });
         });
 
         waClient.on('authenticated', () => {
