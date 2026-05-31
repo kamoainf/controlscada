@@ -80,7 +80,7 @@ async function initWhatsApp() {
             waStatus = 'qr';
             io.emit('whatsapp_qr',     { qr: waQr });
             io.emit('whatsapp_status', { status: waStatus });
-            console.log(\`📱 QR #\${qrCount} généré — scannez MAINTENANT (expire dans ~20s)\`);
+            console.log(`📱 QR #${qrCount} généré — scannez MAINTENANT (expire dans ~20s)`);
             if (qrCount >= 5) console.warn('⚠️  5 QR générés sans scan — vérifiez que vous scannez le QR affiché dans la page');
         });
 
