@@ -1,518 +1,265 @@
 /**
  * KAMOA Control SCADA — server.js
- * WhatsApp BAILEYS intégré directement (pas besoin d'Evolution API)
- * Frontend : https://controlscada.pages.dev/
- * Backend  : https://controlscada-production.up.railway.app/
+ * WhatsApp via whatsapp-web.js + Puppeteer/Chrome
  */
-
-// ── Polyfill crypto global (requis par Baileys sur Node.js < 19) ───────────────
-const crypto = require('crypto');
-if (!globalThis.crypto) {
-    globalThis.crypto = crypto.webcrypto || crypto;
-}
-
-const { createRequire } = require('node:module');
-const req = createRequire(__filename);
 
 const express     = require('express');
 const cors        = require('cors');
 const bodyParser  = require('body-parser');
 const compression = require('compression');
 const http        = require('http');
-const { WebSocketServer } = require('ws');
+const { Server }  = require('socket.io');
 const path        = require('path');
 const fs          = require('fs');
 require('dotenv').config();
 
 const app    = express();
 const server = http.createServer(app);
-const wss    = new WebSocketServer({ server, path: '/ws' });
-const PORT   = process.env.PORT || 8080;
-
-// ── Buffer messages entrants (100 derniers par chatId) ────────────────────────
-const incomingMessages = {};   // { chatId: [ {id, from, body, fromMe, ts, pushName} ] }
-const MAX_MSG_PER_CHAT = 100;
-
-function storeMessage(msg) {
-    const chatId = msg.from;
-    if (!chatId) return;
-    if (!incomingMessages[chatId]) incomingMessages[chatId] = [];
-    // Éviter les doublons
-    if (!incomingMessages[chatId].find(m => m.id === msg.id)) {
-        incomingMessages[chatId].push(msg);
-        if (incomingMessages[chatId].length > MAX_MSG_PER_CHAT)
-            incomingMessages[chatId].shift();
+const io     = new Server(server, {
+    cors: {
+        origin: ['https://controlscada.pages.dev', 'http://localhost:3000', 'http://localhost:8080', '*'],
+        methods: ['GET', 'POST']
     }
-}
+});
+const PORT = process.env.PORT || 8080;
 
-// ── État global WhatsApp ───────────────────────────────────────────────────────
-let waSocket      = null;
-let waSocketId    = 0;          // incrémenté à chaque nouvelle instance, détecte les sockets périmés
-let waStatus      = 'disconnected';
-let waQrBase64    = null;
-let waConnNumber  = null;
-let waConnected   = false;
-let waInitialized = false;
-let waReadyForAPI = false;
-let waReadyTimer  = null;
-let waCleanupInProgress = false;
-let waLoggedOutAt = 0;          // timestamp du dernier 440, empêche les re-sauvegardes post-nettoyage
-
-// ── Broadcast WebSocket ────────────────────────────────────────────────────────
-function broadcast(obj) {
-    const msg = JSON.stringify(obj);
-    wss.clients.forEach(ws => {
-        if (ws.readyState === 1) ws.send(msg);
-    });
-}
-
-// ── Dossier auth (persist session entre redémarrages) ─────────────────────────
-const AUTH_DIR = path.join('/tmp', 'kamoa_auth');
-if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
-
-// ── Helpers session ────────────────────────────────────────────────────────────
-function isSessionValid() {
-    try {
-        const credsFile = path.join(AUTH_DIR, 'creds.json');
-        if (!fs.existsSync(credsFile)) return false;
-        const raw = fs.readFileSync(credsFile, 'utf8');
-        if (!raw || raw.trim().length < 10) return false;
-        const parsed = JSON.parse(raw);
-        if (!parsed.me && !parsed.noiseKey && !parsed.signedIdentityKey) return false;
-        console.log('✅ Session: creds.json valide, compte:', parsed.me?.id || 'inconnu');
-        return true;
-    } catch (e) {
-        console.log('⚠️ Session: erreur lecture creds.json —', e.message);
-        return false;
-    }
-}
-
-function cleanSession(reason = '') {
-    if (waCleanupInProgress) return;
-    waCleanupInProgress = true;
-    console.log(`🧹 Nettoyage session${reason ? ' — ' + reason : ''}...`);
-    try {
-        fs.rmSync(AUTH_DIR, { recursive: true, force: true });
-        fs.mkdirSync(AUTH_DIR, { recursive: true });
-        console.log('✅ Session nettoyée, dossier recréé');
-    } catch (e) {
-        console.error('❌ Erreur nettoyage session:', e.message);
-    } finally {
-        setTimeout(() => { waCleanupInProgress = false; }, 3000);
-    }
-}
-
-// ── Initialiser Baileys (version robuste avec pairing code) ───────────────────
-async function initWhatsApp() {
-    if (waInitialized) return;
-    waInitialized = true;
-
-    // Si un logout vient de se produire, attendre que le nettoyage soit terminé
-    const timeSinceLogout = Date.now() - waLoggedOutAt;
-    if (waLoggedOutAt > 0 && timeSinceLogout < 3000) {
-        await new Promise(r => setTimeout(r, 3000 - timeSinceLogout));
-    }
-
-    console.log('🔍 Vérification de la session stockée dans', AUTH_DIR, '...');
-    const sessionOk = isSessionValid();
-    if (!sessionOk && fs.existsSync(path.join(AUTH_DIR, 'creds.json'))) {
-        console.log('🧹 Session corrompue détectée au démarrage — nettoyage préventif');
-        cleanSession('session corrompue au démarrage');
-        await new Promise(r => setTimeout(r, 1000));
-    }
-
-    // Identifiant unique pour cette instance de socket
-    const mySocketId = ++waSocketId;
-
-    try {
-        const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = 
-            req('@whiskeysockets/baileys');
-
-        let version;
-        if (fetchLatestBaileysVersion) {
-            const v = await fetchLatestBaileysVersion();
-            version = v.version;
-        } else {
-            version = [2, 3000, 1035194821];
-        }
-
-        console.log('📱 Baileys version:', version.join('.'));
-
-        const { state, saveCreds: _saveCreds } = await useMultiFileAuthState(AUTH_DIR);
-
-        // Wrapper : n'écrit les creds que si ce socket est encore le socket courant
-        // et qu'aucun logout n'a été déclenché depuis. Empêche la boucle 440.
-        const saveCreds = () => {
-            if (mySocketId !== waSocketId) {
-                console.log('⚠️ saveCreds ignoré — socket périmé (id mismatch)');
-                return;
-            }
-            if (Date.now() - waLoggedOutAt < 30000) {
-                console.log('⚠️ saveCreds ignoré — logout récent, creds périmés');
-                return;
-            }
-            return _saveCreds();
-        };
-
-        // Options de connexion renforcées
-        waSocket = makeWASocket({
-            version,
-            auth: state,
-            printQRInTerminal: true,
-            browser: ['Ubuntu', 'Chrome', '120.0.0.0'], // plus crédible
-            generateHighQualityLinkPreview: false,
-            syncFullHistory: false,
-            retrieveFullMessageHistoryOnReconnect: false,
-            ignoreUnencryptedMessages: true,
-            connectTimeoutMs: 60000,
-            keepAliveIntervalMs: 30000,
-            retryRequestDelayMs: 5000,
-            defaultQueryTimeoutMs: 60000,
-            patchMessageBeforeSending: (msg) => msg,
-            shouldSyncHistoryMessage: () => false,
-            markOnlineOnConnect: false,
-            fireInitQueries: false,
-            getMessage: async () => undefined,
-            shouldIgnoreJid: (jid) => jid.includes('status') || jid === '0@broadcast',
-        });
-
-        let pairingRequested = false;
-
-        // Fonction utilitaire pour envoyer le QR
-        const sendQRCode = async (qrString) => {
-            try {
-                const QRCode = require('qrcode');
-                const qrBase64 = await QRCode.toDataURL(qrString, { width: 300, margin: 2 });
-                waQrBase64 = qrBase64;
-                waStatus = 'connecting';
-                broadcast({ type: 'qr', qr: qrBase64 });
-                broadcast({ type: 'status', status: 'connecting' });
-                console.log('📲 QR Code généré et diffusé');
-            } catch (e) {
-                console.error('QR gen error:', e.message);
-            }
-        };
-
-        // ── Événement connection.update ───────────────────────────────────────
-        waSocket.ev.on('connection.update', async (update) => {
-            console.log('📡 connection.update reçu:', Object.keys(update));
-            const { connection, lastDisconnect, qr } = update;
-
-            // Gestion du QR ou du pairing code
-            if (qr && !pairingRequested) {
-                pairingRequested = true;
-                const phoneNumber = process.env.WA_PHONE_NUMBER;
-                if (phoneNumber && phoneNumber.trim() !== '') {
-                    try {
-                        const code = await waSocket.requestPairingCode(phoneNumber);
-                        console.log(`📱 Code d'appairage (entrez-le dans WhatsApp) : ${code}`);
-                        broadcast({ type: 'pairing_code', code });
-                    } catch (e) {
-                        console.error('Erreur lors de la demande de code d\'appairage:', e);
-                        await sendQRCode(qr);
-                    }
-                } else {
-                    console.log('📲 Aucun WA_PHONE_NUMBER défini, utilisation du QR code');
-                    await sendQRCode(qr);
-                }
-            }
-
-            if (connection === 'open') {
-                waStatus = 'open';
-                waConnected = true;
-                waQrBase64 = null;
-                waReadyForAPI = false;
-                if (waReadyTimer) clearTimeout(waReadyTimer);
-                waConnNumber = waSocket.user?.id?.split(':')[0] || waSocket.user?.id || '';
-                broadcast({ type: 'status', status: 'open', phone: waConnNumber });
-                console.log('✅ WhatsApp connecté:', waConnNumber);
-
-                const STABILIZATION_DELAY = 5000;
-                console.log(`⏳ Stabilisation en cours — API disponible dans ${STABILIZATION_DELAY/1000}s...`);
-                waReadyTimer = setTimeout(() => {
-                    if (waConnected) {
-                        waReadyForAPI = true;
-                        console.log('🟢 WhatsApp prêt pour les appels API (groupFetchAllParticipating, etc.)');
-                        broadcast({ type: 'ready', phone: waConnNumber });
-                    }
-                    waReadyTimer = null;
-                }, STABILIZATION_DELAY);
-            }
-
-            if (connection === 'close') {
-                waConnected = false;
-                waReadyForAPI = false;
-                waStatus = 'disconnected';
-                if (waReadyTimer) clearTimeout(waReadyTimer);
-                broadcast({ type: 'status', status: 'disconnected' });
-
-                const code = lastDisconnect?.error?.output?.statusCode;
-                const isLoggedOut = code === DisconnectReason.loggedOut || code === 440;
-                const shouldReconnect = !isLoggedOut;
-
-                console.log('🔴 Connexion fermée, code:', code, '— reconnect:', shouldReconnect,
-                    isLoggedOut ? '(session révoquée par WhatsApp)' : '');
-
-                if (isLoggedOut) {
-                    console.log('🚨 Code 440 / loggedOut détecté — nettoyage complet de la session');
-                    broadcast({ type: 'status', status: 'logged_out', message: 'Session révoquée — nouveau QR requis' });
-                    waLoggedOutAt = Date.now();  // bloque saveCreds sur tous les sockets existants
-                    waSocketId++;               // invalide le socket courant immédiatement
-                    cleanSession('code 440 / loggedOut');
-                    waInitialized = false;
-                    console.log('⏳ Attente 60s avant de relancer (anti-blocage WhatsApp)...');
-                    setTimeout(initWhatsApp, 60000);
-                } else {
-                    waInitialized = false;
-                    console.log('🔄 Reconnexion dans 5s...');
-                    setTimeout(initWhatsApp, 5000);
-                }
-            }
-        });
-
-        waSocket.ev.on('creds.update', saveCreds);
-
-        waSocket.ev.on('messages.upsert', ({ messages, type }) => {
-            for (const msg of messages) {
-                if (!msg.message || msg.message?.protocolMessage) continue;
-                const body = msg.message?.conversation
-                          || msg.message?.extendedTextMessage?.text
-                          || msg.message?.imageMessage?.caption
-                          || msg.message?.videoMessage?.caption
-                          || '[media]';
-                if (!body) continue;
-                const chatId   = msg.key.remoteJid || '';
-                const fromMe   = !!msg.key.fromMe;
-                const pushName = msg.pushName || '';
-                const msgId    = msg.key.id || ('' + Date.now());
-                const ts       = typeof msg.messageTimestamp === 'object'
-                                  ? msg.messageTimestamp.low || msg.messageTimestamp.toNumber?.() || Date.now()/1000
-                                  : (msg.messageTimestamp || Date.now()/1000);
-
-                const entry = { id: msgId, from: chatId, body, fromMe, ts, pushName };
-                storeMessage(entry);
-                broadcast({ type: 'message', data: entry });
-            }
-        });
-
-        waSocket.ev.on('connection.error', (err) => {
-            console.error('❌ connection.error Baileys:', err?.message || err);
-        });
-
-        // Gestion des erreurs de décryptage
-        let decryptionErrorCount = 0;
-        let decryptionErrorTimer = null;
-        waSocket.ev.on('message.retry', (msg) => {
-            if (msg.type === 'decryption-error') {
-                decryptionErrorCount++;
-                console.warn(`⚠️ Échec de décryptage #${decryptionErrorCount}`);
-                if (decryptionErrorTimer) clearTimeout(decryptionErrorTimer);
-                decryptionErrorTimer = setTimeout(() => {
-                    if (decryptionErrorCount >= 5) {
-                        console.error('❌ Trop d’erreurs de décryptage — réinitialisation de la session');
-                        cleanSession('trop d’erreurs de décryptage');
-                        waInitialized = false;
-                        waConnected = false;
-                        waReadyForAPI = false;
-                        if (waSocket) waSocket.end();
-                        setTimeout(initWhatsApp, 5000);
-                    }
-                    decryptionErrorCount = 0;
-                }, 10000);
-            }
-        });
-
-    } catch (err) {
-        console.error('❌ Baileys init error:', err.message);
-        waInitialized = false;
-        setTimeout(initWhatsApp, 8000);
-    }
-}
-
-// ── Middleware ────────────────────────────────────────────────────────────────
 app.use(compression());
-app.use(cors({
-    origin: [
-        'https://controlscada.pages.dev',
-        'https://controlscada-production.up.railway.app',
-        'http://localhost:3000',
-        'http://localhost:8080',
-        '*'
-    ],
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'x-api-key']
-}));
+app.use(cors({ origin: '*', methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'] }));
 app.options('*', cors());
-app.use(bodyParser.json({ limit: '10mb' }));
+app.use(bodyParser.json({ limit: '20mb' }));
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(express.static('./'));
 
-// ── WebSocket : envoyer état courant aux nouveaux clients ──────────────────────
-wss.on('connection', (ws) => {
-    console.log('🔌 WS client connecté');
-    ws.send(JSON.stringify({ type: 'status', status: waStatus, phone: waConnNumber }));
-    if (waQrBase64 && waStatus === 'connecting') {
-        ws.send(JSON.stringify({ type: 'qr', qr: waQrBase64 }));
+// ── Chrome path ───────────────────────────────────────────────────────────────
+function findChrome() {
+    const candidates = [
+        process.env.PUPPETEER_EXECUTABLE_PATH,
+        process.env.CHROME_PATH,
+        '/usr/bin/chromium',
+        '/usr/bin/chromium-browser',
+        '/usr/bin/google-chrome',
+    ].filter(Boolean);
+    for (const c of candidates) {
+        if (fs.existsSync(c)) return c;
     }
-    ws.on('error', () => {});
-});
+    return null;
+}
 
-// ── API Routes ────────────────────────────────────────────────────────────────
+// ── État global ───────────────────────────────────────────────────────────────
+let waClient  = null;
+let waStatus  = 'disconnected';
+let waQr      = null;
+let waInfo    = null;
+let waIniting = false;
+const nameCache = new Map();
+const msgBuffer = {};
 
-app.get('/api/health', (req, res) => {
-    res.json({
-        status: 'online',
-        timestamp: new Date(),
-        app: 'KAMOA SCADA',
-        whatsapp: { status: waStatus, phone: waConnNumber, connected: waConnected, readyForAPI: waReadyForAPI }
-    });
-});
+function storeMsgInBuffer(chatId, msg) {
+    if (!msgBuffer[chatId]) msgBuffer[chatId] = [];
+    if (!msgBuffer[chatId].find(m => m.id === msg.id)) {
+        msgBuffer[chatId].push(msg);
+        if (msgBuffer[chatId].length > 100) msgBuffer[chatId].shift();
+    }
+}
 
-app.post('/api/whatsapp/init', async (req, res) => {
+// ── Init WhatsApp ─────────────────────────────────────────────────────────────
+async function initWhatsApp() {
+    if (waIniting) return;
+    waIniting = true;
+    waStatus = 'initializing';
+    io.emit('whatsapp_status', { status: 'initializing' });
+
+    const chromePath = findChrome();
+    if (!chromePath) {
+        console.error('Chrome introuvable');
+        waStatus = 'error'; waIniting = false;
+        io.emit('whatsapp_status', { status: 'error', error: 'Chrome non trouvé' });
+        return;
+    }
+    console.log('Chrome:', chromePath);
+
+    const { Client, LocalAuth } = require('whatsapp-web.js');
+    const QRCode = require('qrcode');
+
     try {
-        if (waConnected) {
-            return res.json({ success: true, status: 'open', phone: waConnNumber, message: 'Déjà connecté' });
-        }
-        waInitialized = false;
-        initWhatsApp();
-        res.json({ success: true, message: 'Initialisation Baileys démarrée', status: waStatus });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
+        waClient = new Client({
+            authStrategy: new LocalAuth({ dataPath: '/tmp/kamoa_wwebjs_auth' }),
+            puppeteer: {
+                headless: true,
+                executablePath: chromePath,
+                args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-gpu','--no-first-run','--disable-extensions']
+            }
+        });
+
+        waClient.on('qr', async (qr) => {
+            console.log('QR généré');
+            waQr = await QRCode.toDataURL(qr, { width: 300, margin: 2 });
+            waStatus = 'qr';
+            io.emit('whatsapp_qr', { qr: waQr, status: 'qr' });
+            io.emit('whatsapp_status', { status: 'qr' });
+        });
+
+        waClient.on('authenticated', () => {
+            waStatus = 'authenticated';
+            io.emit('whatsapp_status', { status: 'authenticated' });
+        });
+
+        waClient.on('ready', () => {
+            waInfo = waClient.info;
+            waStatus = 'connected'; waQr = null;
+            console.log('WhatsApp connecté:', waInfo?.pushname, waInfo?.wid?.user);
+            io.emit('whatsapp_status', { status: 'connected', phone: waInfo?.wid?.user, name: waInfo?.pushname });
+        });
+
+        waClient.on('disconnected', (reason) => {
+            console.warn('WhatsApp déconnecté:', reason);
+            waStatus = 'disconnected'; waQr = null; waInfo = null; waIniting = false;
+            io.emit('whatsapp_status', { status: 'disconnected', reason });
+        });
+
+        waClient.on('auth_failure', (msg) => {
+            console.error('Auth failure:', msg);
+            waStatus = 'auth_failure'; waIniting = false;
+            try { const d='/tmp/kamoa_wwebjs_auth'; if(fs.existsSync(d)) fs.rmSync(d,{recursive:true,force:true}); } catch(_){}
+            io.emit('whatsapp_status', { status: 'auth_failure', error: String(msg) });
+        });
+
+        waClient.on('message', (msg) => {
+            try {
+                const chatId  = msg.from;
+                const isGroup = chatId.endsWith('@g.us');
+                const notify  = msg._data?.notifyName || '';
+                const sender  = notify || msg.author || msg.from;
+                const msgId   = msg.id._serialized;
+                let mediaType = null;
+                if (msg.hasMedia) {
+                    const t = (msg.type||'').toLowerCase();
+                    if (t==='image'||t==='sticker') mediaType='image';
+                    else if (t==='video'||t==='gif') mediaType='video';
+                    else if (t==='audio'||t==='ptt') mediaType='audio';
+                    else if (t==='document') mediaType='document';
+                    else mediaType=t;
+                }
+                const entry = { id:msgId, chatId, chatName:nameCache.get(chatId)||(isGroup?chatId:(notify||chatId)), isGroup, sender, body:msg.body, timestamp:msg.timestamp, fromMe:msg.fromMe, hasMedia:msg.hasMedia, mediaType, pushName:notify };
+                storeMsgInBuffer(chatId, entry);
+                io.emit('whatsapp_message', entry);
+                if (!nameCache.has(chatId)) msg.getChat().then(c=>nameCache.set(chatId,c.name||notify||chatId)).catch(()=>{});
+                if (msg.hasMedia) msg.downloadMedia().then(media=>{ if(media) io.emit('whatsapp_media_ready',{msgId,chatId,mimetype:media.mimetype,mediaType,data:media.data,filename:media.filename||null}); }).catch(()=>{});
+            } catch(e) { console.error('message handler:', e.message); }
+        });
+
+        waClient.on('message_ack', (msg, ack) => {
+            io.emit('whatsapp_msg_ack', { msgId: msg.id._serialized, chatId: msg.from||msg.to, ack });
+        });
+
+        await waClient.initialize();
+        console.log('WhatsApp client démarré');
+    } catch(err) {
+        console.error('init error:', err.message);
+        waStatus = 'error'; waIniting = false;
+        io.emit('whatsapp_status', { status: 'error', error: err.message });
+        setTimeout(initWhatsApp, 15000);
     }
+}
+
+// ── Socket.IO ─────────────────────────────────────────────────────────────────
+io.on('connection', (socket) => {
+    console.log('WS client connecté:', socket.id);
+    socket.emit('whatsapp_status', { status: waStatus, phone: waInfo?.wid?.user||null, name: waInfo?.pushname||null });
+    if (waQr && waStatus === 'qr') socket.emit('whatsapp_qr', { qr: waQr, status: 'qr' });
 });
 
-app.get('/api/whatsapp/status', (req, res) => {
-    res.json({ success: true, status: waStatus, phone: waConnNumber, connected: waConnected, readyForAPI: waReadyForAPI });
-});
+// ── API ───────────────────────────────────────────────────────────────────────
+app.get('/api/health', (req, res) => res.json({ status:'online', whatsapp:{ status:waStatus, phone:waInfo?.wid?.user } }));
+
+app.get('/api/whatsapp/status', (req, res) => res.json({ success:true, status:waStatus, phone:waInfo?.wid?.user||null, name:waInfo?.pushname||null, connected:waStatus==='connected' }));
 
 app.get('/api/whatsapp/qrcode', (req, res) => {
-    if (waConnected) return res.json({ success: true, status: 'open', phone: waConnNumber });
-    if (!waQrBase64) return res.status(404).json({ error: 'QR pas encore prêt — réessayez dans 3s' });
-    res.json({ success: true, qrCode: waQrBase64 });
+    if (waStatus==='connected') return res.json({ success:true, status:'connected', phone:waInfo?.wid?.user });
+    if (!waQr) return res.status(404).json({ error:'QR pas encore prêt' });
+    res.json({ success:true, qrCode:waQr });
+});
+
+app.get('/api/whatsapp/chats', async (req, res) => {
+    if (waStatus!=='connected'||!waClient) return res.status(503).json({ error:'WhatsApp non connecté', status:waStatus });
+    try {
+        const chats = await waClient.getChats();
+        const groups=[], contacts=[];
+        for (const c of chats) {
+            const id = c.id._serialized;
+            nameCache.set(id, c.name||c.id.user);
+            const item = { id, name:c.name||c.id.user||id, unreadCount:c.unreadCount||0, timestamp:c.timestamp, lastMessage:c.lastMessage?{body:(c.lastMessage.body||'').substring(0,100),timestamp:c.lastMessage.timestamp,fromMe:c.lastMessage.fromMe}:null };
+            if (c.isGroup) { item.participants=c.groupMetadata?.participants?.length||0; groups.push(item); }
+            else { item.phone=c.id.user; contacts.push(item); }
+        }
+        res.json({ success:true, groups, contacts });
+    } catch(err) { res.status(500).json({ error:err.message }); }
+});
+
+app.get('/api/whatsapp/messages', async (req, res) => {
+    const { chatId, limit=50 } = req.query;
+    if (!chatId) {
+        const summary={};
+        Object.entries(msgBuffer).forEach(([cid,msgs])=>{ if(msgs.length) summary[cid]=msgs[msgs.length-1]; });
+        return res.json({ success:true, chats:summary });
+    }
+    if (waStatus!=='connected'||!waClient) return res.json({ success:true, chatId, messages:msgBuffer[chatId]||[] });
+    try {
+        const chat = await waClient.getChatById(chatId);
+        const messages = await chat.fetchMessages({ limit:parseInt(limit) });
+        const result = messages.map(m=>({ id:m.id._serialized, sender:nameCache.get(m.author||m.from)||m._data?.notifyName||(m.author||m.from)||'?', body:m.body, timestamp:m.timestamp, fromMe:m.fromMe, hasMedia:m.hasMedia, mediaType:m.hasMedia?m.type:null }));
+        res.json({ success:true, chatId, messages:result });
+    } catch(_) { res.json({ success:true, chatId, messages:msgBuffer[chatId]||[] }); }
 });
 
 app.post('/api/whatsapp/send', async (req, res) => {
     const { to, message } = req.body;
-    if (!to || !message) return res.status(400).json({ error: 'Champs requis: to, message' });
-    if (!waConnected || !waSocket) return res.status(503).json({ error: 'WhatsApp non connecté' });
+    if (!to||!message) return res.status(400).json({ error:'to + message requis' });
+    if (waStatus!=='connected'||!waClient) return res.status(503).json({ error:'WhatsApp non connecté' });
     try {
-        const raw = to.replace(/\D/g, '');
-        const jid = raw.includes('@') ? to : raw + '@s.whatsapp.net';
-        const sent = await waSocket.sendMessage(jid, { text: message });
-        // Stocker le message envoyé dans le buffer
-        const ts = Math.floor(Date.now() / 1000);
-        storeMessage({ id: sent?.key?.id || ('' + ts), from: jid, body: message, fromMe: true, ts, pushName: '' });
-        res.json({ success: true, id: sent?.key?.id });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-// Récupérer les messages d'un chat ou tous les chats récents
-app.get('/api/whatsapp/messages', (req, res) => {
-    if (!waConnected) return res.status(503).json({ error: 'WhatsApp non connecté' });
-    const { chatId, limit = 50 } = req.query;
-    if (chatId) {
-        const msgs = (incomingMessages[chatId] || []).slice(-parseInt(limit));
-        return res.json({ success: true, chatId, messages: msgs });
-    }
-    // Retourner tous les chatIds avec leur dernier message
-    const summary = {};
-    Object.entries(incomingMessages).forEach(([cid, msgs]) => {
-        if (msgs.length) summary[cid] = msgs[msgs.length - 1];
-    });
-    res.json({ success: true, chats: summary });
+        const jid  = to.includes('@') ? to : to.replace(/\D/g,'')+' @s.whatsapp.net';
+        const chat = await waClient.getChatById(jid);
+        const sent = await chat.sendMessage(message);
+        const ts   = sent.timestamp||Math.floor(Date.now()/1000);
+        storeMsgInBuffer(jid, { id:sent.id._serialized, chatId:jid, body:message, fromMe:true, timestamp:ts, sender:waInfo?.pushname||'Moi' });
+        res.json({ success:true, id:sent.id._serialized });
+    } catch(err) { res.status(500).json({ error:err.message }); }
 });
 
 app.post('/api/whatsapp/logout', async (req, res) => {
     try {
-        console.log('🔄 Logout manuel demandé — réinitialisation complète...');
-        if (waReadyTimer) clearTimeout(waReadyTimer);
-        if (waSocket) await waSocket.logout().catch(() => {});
-        waSocket = null;
-        waConnected = false;
-        waReadyForAPI = false;
-        waStatus = 'disconnected';
-        waQrBase64 = null;
-        waConnNumber = null;
-        waInitialized = false;
-        waCleanupInProgress = false;
-        cleanSession('logout manuel');
-        broadcast({ type: 'status', status: 'disconnected' });
-        setTimeout(initWhatsApp, 2000);
-        res.json({ success: true, message: 'Session réinitialisée, nouveau QR en cours...' });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+        if (waClient) { await waClient.destroy().catch(()=>{}); waClient=null; }
+        waStatus='disconnected'; waQr=null; waInfo=null; waIniting=false; nameCache.clear();
+        try { const d='/tmp/kamoa_wwebjs_auth'; if(fs.existsSync(d)) fs.rmSync(d,{recursive:true,force:true}); } catch(_){}
+        io.emit('whatsapp_status',{status:'disconnected'});
+        setTimeout(initWhatsApp,2000);
+        res.json({ success:true, message:'Session réinitialisée, QR en cours...' });
+    } catch(err) { res.status(500).json({ error:err.message }); }
 });
 
-app.get('/api/whatsapp/chats', async (req, res) => {
-    if (!waConnected || !waSocket) {
-        return res.status(503).json({ error: 'WhatsApp non connecté', status: waStatus });
-    }
-    if (!waReadyForAPI) {
-        return res.status(503).json({ error: 'WhatsApp connecté mais pas encore prêt — stabilisation en cours', readyForAPI: false });
-    }
-    try {
-        console.log('📋 Récupération des groupes via groupFetchAllParticipating()...');
-        const groupsPromise = waSocket.groupFetchAllParticipating();
-        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout > 20s')), 20000));
-        const groups = await Promise.race([groupsPromise, timeoutPromise]);
-        const groupList = Object.entries(groups).map(([id, g]) => ({
-            id, name: g.subject || id, isGroup: true, participants: g.participants?.length || 0
-        }));
-        let contacts = [];
-        try {
-            if (waSocket.store && waSocket.store.chats) {
-                contacts = Array.from(waSocket.store.chats.values())
-                    .filter(c => !c.id.endsWith('@g.us'))
-                    .map(c => ({ id: c.id, name: c.name || c.id.split('@')[0], isGroup: false, unread: c.unreadCount || 0 }));
-            }
-        } catch (e) { console.warn('⚠️ Impossible de récupérer les contacts individuels:', e.message); }
-        console.log(`✅ ${groupList.length} groupe(s) et ${contacts.length} contact(s) récupéré(s)`);
-        res.json({ success: true, groups: groupList, contacts });
-    } catch (err) {
-        console.error('❌ groupFetchAllParticipating() erreur:', err.message);
-        if (err.message?.includes('Connection Closed') || err.message?.includes('stream errored')) {
-            waConnected = false;
-            waReadyForAPI = false;
-            waStatus = 'disconnected';
-            broadcast({ type: 'status', status: 'disconnected' });
-        }
-        res.status(500).json({ error: err.message, hint: 'Utilisez POST /api/whatsapp/logout pour réinitialiser' });
-    }
-});
-
-app.get('/api/whatsapp/debug', (req, res) => {
-    if (!waSocket) return res.json({ error: 'socket null', connected: false });
-    res.json({
-        user: waSocket.user,
-        connected: waConnected,
-        readyForAPI: waReadyForAPI,
-        wsReadyState: waSocket.ws?.readyState,
-        registered: waSocket.registered,
-        storeKeys: waSocket.store ? Object.keys(waSocket.store) : [],
-    });
+app.post('/api/whatsapp/reconnect', async (req, res) => {
+    res.json({ success:true, message:'Reconnexion en cours...' });
+    if (waClient) { await waClient.destroy().catch(()=>{}); waClient=null; }
+    waIniting=false;
+    setTimeout(initWhatsApp,1000);
 });
 
 app.get('/', (req, res) => {
-    const f = path.join(__dirname, 'index.html');
+    const f=path.join(__dirname,'index.html');
     if (fs.existsSync(f)) return res.sendFile(f);
-    res.json({ status: 'KAMOA SCADA API online', whatsapp: waStatus });
+    res.json({ status:'KAMOA SCADA API online', whatsapp:waStatus });
 });
-app.use((req, res) => res.status(404).json({ error: 'Route introuvable' }));
+app.use((req,res)=>res.status(404).json({error:'Route introuvable'}));
 
 // ── Démarrage ─────────────────────────────────────────────────────────────────
 server.listen(PORT, () => {
     console.log(`
 ╔══════════════════════════════════════════════════╗
-║  🚀 KAMOA Control SCADA — Railway                ║
-║  📱 WhatsApp Baileys intégré (QR natif)          ║
-║  🌐 https://controlscada-production.up.railway.app ║
+║  🚀 KAMOA Control SCADA                          ║
+║  📱 WhatsApp via whatsapp-web.js + Chrome        ║
 ║  🌐 Port: ${PORT}                                   ║
 ╚══════════════════════════════════════════════════╝`);
-    setTimeout(initWhatsApp, 2000);
+    setTimeout(initWhatsApp, 3000);
 });
 
 module.exports = app;
