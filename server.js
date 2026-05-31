@@ -51,7 +51,6 @@ async function initWhatsApp() {
         const { Client, LocalAuth } = require('whatsapp-web.js');
         const QRCode = require('qrcode');
 
-        // Utiliser Chromium système (défini dans Dockerfile via PUPPETEER_EXECUTABLE_PATH)
         const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium';
 
         waClient = new Client({
@@ -67,8 +66,19 @@ async function initWhatsApp() {
                     '--disable-software-rasterizer',
                     '--disable-extensions',
                     '--no-first-run',
-                    '--single-process',
-                    '--no-zygote'
+                    '--no-default-browser-check',
+                    '--disable-background-networking',
+                    '--disable-default-apps',
+                    '--disable-sync',
+                    '--disable-translate',
+                    '--metrics-recording-only',
+                    '--mute-audio',
+                    '--safebrowsing-disable-auto-update',
+                    '--ignore-certificate-errors',
+                    '--ignore-ssl-errors',
+                    '--ignore-certificate-errors-spki-list'
+                    // ⚠️ PAS de --single-process ni --no-zygote
+                    // Ces flags font crasher Chrome après authentification
                 ]
             }
         });
@@ -115,9 +125,21 @@ async function initWhatsApp() {
             console.log('🔌 WhatsApp déconnecté:', reason);
             waStatus  = 'disconnected';
             waIniting = false;
-            io.emit('whatsapp_status', { status: waStatus });
-            // Reconnexion automatique après 15s
-            setTimeout(initWhatsApp, 15000);
+            waQr      = null;
+            io.emit('whatsapp_status', { status: waStatus, reason });
+
+            // Détruire proprement le client avant de réinitialiser
+            try { waClient.destroy(); } catch(e) {}
+            waClient = null;
+
+            const delay = reason === 'LOGOUT' ? 3000 : 15000;
+            console.log(`♻️  Réinitialisation dans ${delay/1000}s...`);
+            setTimeout(initWhatsApp, delay);
+        });
+
+        // Gérer le crash Chrome (ECONNRESET, etc.)
+        waClient.on('change_state', (state) => {
+            console.log('📶 WhatsApp state:', state);
         });
 
         await waClient.initialize();

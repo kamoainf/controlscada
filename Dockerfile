@@ -75,6 +75,10 @@ EXPOSE 3000
 # mais on s'assure que /tmp est accessible pour LocalAuth
 RUN mkdir -p /tmp/kamoa_auth && chmod 777 /tmp/kamoa_auth
 
+# Augmenter /dev/shm pour éviter le crash Chrome après authentification
+# (Chrome utilise /dev/shm pour le rendu — trop petit = crash post-scan)
+RUN mkdir -p /dev/shm && chmod 1777 /dev/shm
+
 # ─────────────────────────────────────────────
 # 🚀 START
 # ─────────────────────────────────────────────
