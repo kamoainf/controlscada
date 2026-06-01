@@ -1,85 +1,24 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# KAMOA SCADA — Dockerfile (UltraMsg, no Puppeteer / Chromium)
+# ─────────────────────────────────────────────────────────────────────────────
 FROM node:20-slim
 
 WORKDIR /app
 
-# ─────────────────────────────────────────────
-# 🔧 CHROMIUM SYSTÈME + dépendances complètes
-# ─────────────────────────────────────────────
-RUN apt-get update && apt-get install -y \
-    chromium \
-    ca-certificates \
-    fonts-liberation \
-    fonts-noto-color-emoji \
-    libasound2 \
-    libatk-bridge2.0-0 \
-    libatk1.0-0 \
-    libc6 \
-    libcairo2 \
-    libcups2 \
-    libdbus-1-3 \
-    libdrm2 \
-    libexpat1 \
-    libfontconfig1 \
-    libgbm1 \
-    libgcc1 \
-    libglib2.0-0 \
-    libgtk-3-0 \
-    libnspr4 \
-    libnss3 \
-    libpango-1.0-0 \
-    libpangocairo-1.0-0 \
-    libstdc++6 \
-    libx11-6 \
-    libx11-xcb1 \
-    libxcb1 \
-    libxcomposite1 \
-    libxcursor1 \
-    libxdamage1 \
-    libxext6 \
-    libxfixes3 \
-    libxi6 \
-    libxkbcommon0 \
-    libxrandr2 \
-    libxrender1 \
-    libxss1 \
-    libxtst6 \
-    xdg-utils \
-    wget \
-    --no-install-recommends \
-    && rm -rf /var/lib/apt/lists/*
-
-# ─────────────────────────────────────────────
-# 🚫 EMPÊCHER Puppeteer de télécharger Chrome
-#    → utiliser Chromium système
-# ─────────────────────────────────────────────
-ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
-ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
-
-# ─────────────────────────────────────────────
-# 📦 INSTALL NODE DEPENDENCIES
-# ─────────────────────────────────────────────
+# ── Node dependencies only — no browser needed ───────────────────────────────
 COPY package*.json ./
+
+# Remove whatsapp-web.js and puppeteer from the install if still in package.json
+# (safe to run even if they're already gone)
+RUN npm uninstall --save whatsapp-web.js puppeteer puppeteer-core 2>/dev/null || true
+
 RUN npm install --omit=dev
 
-# ─────────────────────────────────────────────
-# 📁 COPY PROJECT FILES
-# ─────────────────────────────────────────────
+# ── Application files ─────────────────────────────────────────────────────────
 COPY . .
 
-# ─────────────────────────────────────────────
-# 🌐 PORT + USER SÉCURISÉ
-# ─────────────────────────────────────────────
+# ── Port ──────────────────────────────────────────────────────────────────────
 EXPOSE 3000
 
-# Northflank tourne souvent en root — pas besoin d'un user séparé
-# mais on s'assure que /tmp est accessible pour LocalAuth
-RUN mkdir -p /tmp/kamoa_auth && chmod 777 /tmp/kamoa_auth
-
-# Augmenter /dev/shm pour éviter le crash Chrome après authentification
-# (Chrome utilise /dev/shm pour le rendu — trop petit = crash post-scan)
-RUN mkdir -p /dev/shm && chmod 1777 /dev/shm
-
-# ─────────────────────────────────────────────
-# 🚀 START
-# ─────────────────────────────────────────────
-CMD ["npm", "start"]
+# ── Start ─────────────────────────────────────────────────────────────────────
+CMD ["node", "server.js"]
