@@ -5556,6 +5556,52 @@
         var wawMsgSearchQ     = '';   // search within active conversation
         var wawAllChats       = [];
 
+        function waEscapeHtml(v){
+            return String(v||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;');
+        }
+        function waNiceChatName(c, cid){
+            var n = (c && (c.name || c.subject || c.pushName || c.notify || c.chatName)) || '';
+            if (!n || n.indexOf('@') !== -1 || n === cid) n = waJidToNum(cid) || cid;
+            return n;
+        }
+        function waAvatarHtml(obj, fallbackEmoji){
+            var url = obj && (obj.picture || obj.profilePicUrl || obj.avatar || obj.photo);
+            if (url) return '<img src="'+waEscapeHtml(url)+'" alt="" referrerpolicy="no-referrer" onerror="this.style.display=\'none\';this.parentNode.textContent=\''+(fallbackEmoji||'💬')+'\';" style="width:100%;height:100%;border-radius:50%;object-fit:cover;display:block">';
+            return fallbackEmoji || '💬';
+        }
+        function waUpsertChat(dbChats, raw){
+            var cid = raw.id || raw.jid || raw.chatId || raw.from || raw.umId || raw.phone;
+            if (!cid) return dbChats;
+            var num = waJidToNum(cid);
+            var isGroup = cid.indexOf('@g.us') !== -1 || raw.isGroup === true;
+            var name = waNiceChatName(raw, cid);
+            var pic = raw.picture || raw.profilePicUrl || raw.avatar || raw.photo || '';
+            var existing = dbChats.find(function(c){ return (c.umId||c.phone||c.id)===cid || c.phone===num; });
+            if (!existing) {
+                dbChats.push({ id:'api_'+Date.now()+'_'+Math.random().toString(16).slice(2), umId:cid, phone:num, emoji:isGroup?'👥':'👤', name:name, isGroup:isGroup, picture:pic, profilePicUrl:pic });
+            } else {
+                existing.umId = cid;
+                existing.phone = existing.phone || num;
+                existing.isGroup = isGroup;
+                existing.emoji = existing.emoji || (isGroup?'👥':'👤');
+                if (name && (!existing.name || existing.name.indexOf('@') !== -1 || existing.name === existing.phone || existing.name === cid || isGroup)) existing.name = name;
+                if (pic) { existing.picture = pic; existing.profilePicUrl = pic; }
+            }
+            return dbChats;
+        }
+        async function wawSyncServerChats(){
+            try {
+                var r = await fetch(RAILWAY_API + '/whatsapp/chats');
+                var d = await r.json();
+                if (!r.ok || !d.success) return false;
+                var dbChats = waDB_loadChats();
+                (d.chats || []).forEach(function(c){ dbChats = waUpsertChat(dbChats, c); });
+                waDB_saveChats(dbChats);
+                wawBuildAllChats(); wawRenderChatList(); wawUpdateTotalBadge();
+                return true;
+            } catch(e) { return false; }
+        }
+
         // ── OPEN / CLOSE ──────────────────────────────────────────
         function toggleWaChat(){
             waChatOpen = !waChatOpen;
@@ -5575,6 +5621,7 @@
                 wawBuildAllChats();
                 wawRenderChatList();
                 wawUpdateTotalBadge();
+                wawSyncServerChats();
             } else {
                 if (waMyPhone) document.getElementById('waMyPhone').value = waMyPhone;
             }
@@ -5720,10 +5767,13 @@
             var chats = waDB_loadChats();
             var existing = chats.find(function(c){ return (c.umId||c.phone||c.id) === chatId || c.phone === num; });
             if (!existing) {
-                chats.push({ id:'ws_'+Date.now(), umId:chatId, phone:num, emoji:isGroup?'👥':'👤', name:displayName, isGroup:isGroup });
+                chats.push({ id:'ws_'+Date.now(), umId:chatId, phone:num, emoji:isGroup?'👥':'👤', name:displayName, isGroup:isGroup, picture:data.picture||data.profilePicUrl||'' });
                 waDB_saveChats(chats);
-            } else if (data.pushName && (!existing.name || existing.name === num)) {
-                existing.name = data.pushName; waDB_saveChats(chats);
+            } else {
+                var betterName = data.chatName || data.name || data.pushName;
+                if (betterName && (!existing.name || existing.name === num || existing.name === chatId || existing.name.indexOf('@') !== -1 || isGroup)) existing.name = betterName;
+                if (data.picture || data.profilePicUrl) { existing.picture = data.picture || data.profilePicUrl; existing.profilePicUrl = existing.picture; }
+                waDB_saveChats(chats);
             }
 
             var entry = {
@@ -5926,13 +5976,11 @@
                 var cid = g.umId || g.phone || g.id;
                 var last = waDB_lastMsg(cid);
                 var unread = waDB_countUnread(cid);
-                // Nettoyer le nom si c'est un JID brut (@s.whatsapp.net, @g.us)
-                var name = g.name || '';
-                if (!name || name.indexOf('@') !== -1 || name === cid) {
-                    name = waJidToNum(cid) || cid;
-                }
+                var name = waNiceChatName(g, cid);
                 chatMap[cid] = {
-                    id: cid, name: name, emoji: g.emoji||'👥',
+                    id: cid, name: name, emoji: g.emoji||(g.isGroup?'👥':'👤'),
+                    picture: g.picture || g.profilePicUrl || g.avatar || '',
+                    profilePicUrl: g.profilePicUrl || g.picture || g.avatar || '',
                     lastMsg: last ? last.body : '',
                     lastTime: last ? last.time : '',
                     lastTs: last ? (last.ts||0) : 0,
@@ -5984,7 +6032,7 @@
                 // Highlight search term in name
                 var displayName = q ? c.name.replace(new RegExp('('+q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+')','gi'),'<mark style="background:rgba(212,133,58,.4);color:inherit;border-radius:2px">$1</mark>') : c.name;
                 return '<div class="waw-ci'+(active?' active':'')+(c.pinned?' pinned':'')+'" data-cid="'+c.id+'" onclick="wawSelectChat(\''+c.id.replace(/\\/g,'\\\\').replace(/'/g,"\\'")+'\')">'
-                    +'<div class="waw-ci-av">'+(c.pinned?'📌':c.emoji)+'</div>'
+                    +'<div class="waw-ci-av">'+(c.pinned?'📌':waAvatarHtml(c,c.emoji))+'</div>'
                     +'<div class="waw-ci-body">'
                     +'<div class="waw-ci-top"><span class="waw-ci-name">'+displayName+'</span><span class="waw-ci-time">'+c.lastTime+'</span></div>'
                     +'<div class="waw-ci-bottom">'
@@ -6022,7 +6070,7 @@
             document.getElementById('wawEmptyState').style.display = 'none';
             var ca = document.getElementById('wawConvActive');
             ca.style.display = 'flex';
-            document.getElementById('wawConvAv').textContent = wawActiveChatEmoji;
+            document.getElementById('wawConvAv').innerHTML = waAvatarHtml(chat, wawActiveChatEmoji);
             document.getElementById('wawConvName').textContent = wawActiveChatName;
             document.getElementById('wawConvSub').textContent = chatId;
             // Clear message search
@@ -6197,7 +6245,7 @@
             if (!wawActiveChatId) return;
             var icon = document.getElementById('wawConvSyncIcon');
             if (icon) icon.style.animation = 'spin 1s linear infinite';
-            fetch(RAILWAY_API+'/whatsapp/chats')
+            fetch(RAILWAY_API+'/whatsapp/messages?chatId='+encodeURIComponent(wawActiveChatId))
                 .then(function(r){return r.json();})
                 .then(function(data){
                     if(icon) icon.style.animation='';
@@ -6362,6 +6410,7 @@
         // ── FETCH INBOX (tous les messages récents depuis Railway) ───
         // Essaie /messages d'abord, puis fallback /chats si 404
         function wawFetchInbox(manual){
+            wawSyncServerChats();
             function processInboxData(data){
                 // Accepte { success, chats:{jid:{body,ts,pushName,fromMe,id}} }
                 // ou tableau direct [{from,body,ts,...}]
@@ -6375,11 +6424,8 @@
                     Object.keys(summary).forEach(function(cid){
                         var m = summary[cid];
                         var num = waJidToNum(cid);
-                        var name = m.pushName || num;
-                        if(!dbChats.find(function(c){ return (c.umId||c.phone||c.id)===cid||c.phone===num; })){
-                            dbChats.push({ id:'api_'+Date.now()+'_'+num, umId:cid, phone:num,
-                                emoji: cid.indexOf('@g.us')!==-1?'👥':'👤', name:name, isGroup:cid.indexOf('@g.us')!==-1 });
-                        }
+                        var name = m.chatName || m.name || m.pushName || num;
+                        dbChats = waUpsertChat(dbChats, {id:cid, name:name, isGroup:cid.indexOf('@g.us')!==-1, picture:m.picture||m.profilePicUrl||''});
                         var ts = m.ts || 0;
                         var d2 = ts ? new Date(ts*1000) : new Date();
                         var entry = { id:m.id||(''+(ts||Date.now())+cid), from:name, body:m.body||'', fromMe:!!m.fromMe,
@@ -6394,11 +6440,8 @@
                         var cid = m.chatId || m.from || '';
                         if (!cid) return;
                         var num = waJidToNum(cid);
-                        var name = m.pushName || m.name || num;
-                        if(!dbChats.find(function(c){ return (c.umId||c.phone||c.id)===cid||c.phone===num; })){
-                            dbChats.push({ id:'api_'+Date.now()+'_'+num, umId:cid, phone:num,
-                                emoji:cid.indexOf('@g.us')!==-1?'👥':'👤', name:name, isGroup:cid.indexOf('@g.us')!==-1 });
-                        }
+                        var name = m.chatName || m.name || m.pushName || num;
+                        dbChats = waUpsertChat(dbChats, {id:cid, name:name, isGroup:cid.indexOf('@g.us')!==-1 || m.isGroup, picture:m.picture||m.profilePicUrl||''});
                         var ts = m.ts || m.timestamp || 0;
                         var d2 = ts ? new Date(ts*1000) : new Date();
                         var entry = { id:m.id||(''+(ts||Date.now())+cid), from:name, body:m.body||m.message||'',

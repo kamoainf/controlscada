@@ -265,6 +265,53 @@ class WhatsAppIntegration {
         }
     }
 
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // API — RÉCUPÉRER LES MESSAGES RÉCENTS OU D'UNE CONVERSATION
+    // ─────────────────────────────────────────────────────────────────────────
+    async getMessages(chatId = '') {
+        try {
+            const qs = chatId ? `?chatId=${encodeURIComponent(chatId)}` : '';
+            const res  = await fetch(`${this.baseUrl}/api/whatsapp/messages${qs}`);
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+            return data; // { success, messages, total }
+        } catch (err) {
+            console.error('❌ getMessages error:', err.message);
+            return { success: false, messages: [], error: err.message };
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // API — PHOTO DE PROFIL CONTACT / GROUPE
+    // ─────────────────────────────────────────────────────────────────────────
+    async getProfilePicture(jid) {
+        try {
+            const res  = await fetch(`${this.baseUrl}/api/whatsapp/profile-picture/${encodeURIComponent(jid)}`);
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+            return data; // { success, url }
+        } catch (err) {
+            console.warn('⚠️ profile picture indisponible:', err.message);
+            return { success: false, url: '', error: err.message };
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // API — TÉLÉCHARGER UN MÉDIA REÇU
+    // ─────────────────────────────────────────────────────────────────────────
+    async getMedia(messageId) {
+        try {
+            const res  = await fetch(`${this.baseUrl}/api/whatsapp/media/${encodeURIComponent(messageId)}`);
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+            return data; // { success, data/base64, mimetype }
+        } catch (err) {
+            console.error('❌ getMedia error:', err.message);
+            return { success: false, error: err.message };
+        }
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // API — RÉCUPÉRER LES CONTACTS
     // ─────────────────────────────────────────────────────────────────────────

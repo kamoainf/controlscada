@@ -43,6 +43,9 @@ let waInitialized = false;
 let cachedChats    = [];   // { id, name, isGroup, unreadCount, lastMessage, timestamp }
 let cachedContacts = {};   // jid → { id, name, notify, pushName }
 let cachedGroups   = {};   // jid → metadata complète
+let cachedMessages = [];   // messages récents normalisés
+let mediaMessages  = new Map(); // messageId → message Baileys original pour téléchargement média
+let downloadMediaMessageFn = null;
 
 // ── Dossier de session (persisté dans /tmp sur Railway) ───────────────────────
 const AUTH_DIR = path.join('/tmp', 'kamoa_auth');
@@ -89,6 +92,7 @@ async function initWhatsApp() {
             jidNormalizedUser,
             downloadMediaMessage,
         } = await import('@whiskeysockets/baileys');
+        downloadMediaMessageFn = downloadMediaMessage;
 
         // Logger silencieux (pino) pour éviter le bruit en production
         const pino = require('pino');
@@ -140,6 +144,7 @@ async function initWhatsApp() {
                 waConnNumber  = waSocket.user?.id?.split(':')[0] ?? waSocket.user?.id ?? '';
                 broadcast({ type: 'status', status: 'open', phone: waConnNumber });
                 console.log(`✅ WhatsApp connecté — numéro: ${waConnNumber}`);
+                refreshGroupsCache().then(() => broadcast({ type: 'chats_update', count: cachedChats.length })).catch(() => {});
             }
 
             // ── Déconnecté ────────────────────────────────────────────────────
@@ -177,37 +182,59 @@ async function initWhatsApp() {
             messages.forEach(msg => {
                 if (!msg.message) return;
 
-                const body = msg.message?.conversation
-                    ?? msg.message?.extendedTextMessage?.text
-                    ?? msg.message?.imageMessage?.caption
-                    ?? msg.message?.videoMessage?.caption
-                    ?? msg.message?.documentMessage?.title
-                    ?? '[media]';
-
                 const from      = msg.key.remoteJid ?? '';
                 const fromMe    = msg.key.fromMe ?? false;
                 const messageId = msg.key.id ?? '';
                 const timestamp = Number(msg.messageTimestamp ?? 0);
                 const pushName  = msg.pushName ?? '';
                 const isGroup   = isJidGroup(from);
+                const meta      = extractTextAndMedia(msg);
+                const groupName = isGroup ? (cachedGroups[from]?.subject || '') : '';
+                const displayName = groupName || pushName || from;
 
-                const payload = {
-                    type: 'message',
-                    data: {
-                        messageId,
-                        from,
-                        fromMe,
-                        body,
-                        timestamp,
-                        pushName,
-                        isGroup,
-                    },
+                if (meta.hasMedia && messageId) mediaMessages.set(messageId, msg);
+
+                const normalized = {
+                    id: messageId,
+                    messageId,
+                    chatId: from,
+                    from,
+                    fromMe,
+                    body: meta.body,
+                    message: meta.body,
+                    timestamp,
+                    ts: timestamp,
+                    pushName,
+                    name: displayName,
+                    chatName: displayName,
+                    isGroup,
+                    hasMedia: meta.hasMedia,
+                    mediaType: meta.mediaType,
+                    mimetype: meta.mimetype,
+                    fileName: meta.fileName,
+                    caption: meta.caption,
                 };
 
-                broadcast(payload);
+                cachedMessages.push(normalized);
+                if (cachedMessages.length > 1000) cachedMessages = cachedMessages.slice(-1000);
+
+                const idx = cachedChats.findIndex(c => c.id === from);
+                const chatEntry = {
+                    id: from,
+                    name: displayName,
+                    isGroup,
+                    unreadCount: 0,
+                    lastMessage: meta.body,
+                    timestamp,
+                };
+                if (idx >= 0) cachedChats[idx] = { ...cachedChats[idx], ...chatEntry };
+                else cachedChats.push(chatEntry);
+
+                broadcast({ type: 'message', data: normalized });
+                broadcast({ type: 'whatsapp_message', data: normalized });
 
                 if (!fromMe) {
-                    console.log(`📩 Message reçu de ${pushName || from}: ${body.substring(0, 80)}`);
+                    console.log(`📩 Message reçu de ${displayName}: ${meta.body.substring(0, 80)}`);
                 }
             });
         });
@@ -296,8 +323,10 @@ app.use(express.static('./'));
 
 /** Normalise un numéro de téléphone en JID WhatsApp individuel */
 function toJid(number) {
-    const digits = String(number).replace(/\D/g, '');
-    return digits.endsWith('@s.whatsapp.net') ? digits : `${digits}@s.whatsapp.net`;
+    const value = String(number || '').trim();
+    if (value.endsWith('@s.whatsapp.net') || value.endsWith('@g.us')) return value;
+    const digits = value.replace(/\D/g, '');
+    return `${digits}@s.whatsapp.net`;
 }
 
 /** Normalise un ID de groupe en JID WhatsApp groupe */
@@ -314,6 +343,91 @@ function withTimeout(promise, ms = 15_000, label = 'opération') {
             setTimeout(() => reject(new Error(`Timeout: ${label} > ${ms}ms`)), ms)
         ),
     ]);
+}
+
+
+function getMessageType(message = {}) {
+    const k = Object.keys(message || {}).find(x => x !== 'messageContextInfo');
+    return k || null;
+}
+
+function extractTextAndMedia(msg) {
+    const m = msg.message || {};
+    const type = getMessageType(m);
+    let body = m.conversation
+        ?? m.extendedTextMessage?.text
+        ?? m.imageMessage?.caption
+        ?? m.videoMessage?.caption
+        ?? m.documentMessage?.title
+        ?? m.documentMessage?.fileName
+        ?? null;
+    if (!body && m.audioMessage) body = '[audio]';
+    if (!body) body = '[media]';
+    const mediaNode = type ? m[type] : null;
+    return {
+        type,
+        body: typeof body === 'string' ? body : '[media]',
+        hasMedia: !!(type && ['imageMessage','videoMessage','documentMessage','audioMessage','stickerMessage'].includes(type)),
+        mediaType: type ? type.replace('Message','') : null,
+        mimetype: mediaNode?.mimetype || null,
+        fileName: mediaNode?.fileName || mediaNode?.title || null,
+        caption: mediaNode?.caption || null,
+    };
+}
+
+function safeName(v) {
+    return String(v || '').trim();
+}
+
+async function getProfilePicture(jid) {
+    try {
+        if (!waSocket || !jid) return '';
+        return await withTimeout(waSocket.profilePictureUrl(jid, 'image'), 7_000, 'profilePictureUrl');
+    } catch (_) {
+        return '';
+    }
+}
+
+async function refreshGroupsCache() {
+    if (!waConnected || !waSocket) return cachedGroups;
+    try {
+        const rawGroups = await withTimeout(waSocket.groupFetchAllParticipating(), 20_000, 'groupFetchAllParticipating');
+        cachedGroups = rawGroups || {};
+        Object.entries(cachedGroups).forEach(([id, g]) => {
+            if (!cachedChats.find(c => c.id === id)) {
+                cachedChats.push({
+                    id,
+                    name: g.subject || id,
+                    isGroup: true,
+                    unreadCount: 0,
+                    lastMessage: '',
+                    timestamp: Number(g.creation || 0),
+                });
+            }
+        });
+        return cachedGroups;
+    } catch (e) {
+        console.warn('⚠️ Impossible de rafraîchir les groupes:', e.message);
+        return cachedGroups;
+    }
+}
+
+async function buildChatEntry(chat) {
+    const id = chat.id;
+    const isGroup = String(id).endsWith('@g.us');
+    let name = chat.name || id;
+    let participants = null;
+    let picture = '';
+    if (isGroup) {
+        const meta = cachedGroups[id];
+        name = safeName(meta?.subject) || safeName(chat.name) || id;
+        participants = meta?.participants?.length ?? null;
+    } else {
+        const c = cachedContacts[id] || {};
+        name = safeName(c.name) || safeName(c.notify) || safeName(c.pushName) || safeName(chat.name) || id.replace('@s.whatsapp.net','');
+    }
+    picture = await getProfilePicture(id);
+    return { ...chat, id, jid: id, name, isGroup, participants, picture, profilePicUrl: picture };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -447,27 +561,106 @@ app.post('/api/whatsapp/send-media', async (req, res) => {
 // ── Récupérer tous les chats (groupes + contacts) ─────────────────────────────
 app.get('/api/whatsapp/chats', async (_req, res) => {
     if (!waConnected || !waSocket) {
-        return res.status(503).json({ error: 'WhatsApp non connecté', status: waStatus });
+        return res.status(503).json({ success: false, error: 'WhatsApp non connecté', status: waStatus, chats: [] });
     }
     try {
-        // Enrichir avec les métadonnées des groupes si disponibles
-        const chats = cachedChats.map(chat => ({
-            ...chat,
-            name: chat.isGroup
-                ? (cachedGroups[chat.id]?.subject ?? chat.name)
-                : (cachedContacts[chat.id]?.name ?? chat.name),
-            participants: chat.isGroup
-                ? (cachedGroups[chat.id]?.participants?.length ?? null)
-                : null,
-        }));
+        await refreshGroupsCache();
+        const byId = new Map();
+        cachedChats.forEach(c => byId.set(c.id, c));
+        Object.entries(cachedGroups).forEach(([id, g]) => {
+            const old = byId.get(id) || {};
+            byId.set(id, {
+                id,
+                name: g.subject || old.name || id,
+                isGroup: true,
+                unreadCount: old.unreadCount || 0,
+                lastMessage: old.lastMessage || '',
+                timestamp: old.timestamp || Number(g.creation || 0),
+            });
+        });
+        Object.values(cachedContacts).forEach(c => {
+            if (!c.id || String(c.id).endsWith('@g.us')) return;
+            const old = byId.get(c.id) || {};
+            byId.set(c.id, {
+                id: c.id,
+                name: c.name || c.notify || c.pushName || old.name || c.id,
+                isGroup: false,
+                unreadCount: old.unreadCount || 0,
+                lastMessage: old.lastMessage || '',
+                timestamp: old.timestamp || 0,
+            });
+        });
 
-        // Trier par timestamp décroissant
-        chats.sort((a, b) => b.timestamp - a.timestamp);
-
+        const chats = await Promise.all(Array.from(byId.values()).map(buildChatEntry));
+        chats.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
         res.json({ success: true, chats, total: chats.length });
     } catch (err) {
         console.error('❌ Erreur récupération chats:', err.message);
-        res.status(500).json({ error: err.message });
+        res.status(500).json({ success: false, error: err.message, chats: [] });
+    }
+});
+
+// ── Récupérer les messages récents ou ceux d'une conversation ────────────────
+app.get('/api/whatsapp/messages', async (req, res) => {
+    if (!waConnected || !waSocket) {
+        return res.status(503).json({ success: false, error: 'WhatsApp non connecté', status: waStatus, messages: [] });
+    }
+    try {
+        const chatId = req.query.chatId ? String(req.query.chatId) : '';
+        let messages = cachedMessages;
+        if (chatId) messages = messages.filter(m => m.chatId === chatId || m.from === chatId);
+        res.json({ success: true, messages, total: messages.length });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message, messages: [] });
+    }
+});
+
+// ── Télécharger un média reçu ────────────────────────────────────────────────
+app.get('/api/whatsapp/media/:messageId', async (req, res) => {
+    if (!waConnected || !waSocket) {
+        return res.status(503).json({ success: false, error: 'WhatsApp non connecté', status: waStatus });
+    }
+    if (!downloadMediaMessageFn) {
+        return res.status(503).json({ success: false, error: 'Téléchargement média non prêt' });
+    }
+    try {
+        const msg = mediaMessages.get(req.params.messageId);
+        if (!msg) return res.status(404).json({ success: false, error: 'Média non trouvé ou trop ancien' });
+        const meta = extractTextAndMedia(msg);
+        const buffer = await withTimeout(
+            downloadMediaMessageFn(msg, 'buffer', {}, { reuploadRequest: waSocket.updateMediaMessage }),
+            30_000,
+            'downloadMediaMessage'
+        );
+        const mimetype = meta.mimetype || 'application/octet-stream';
+        res.json({
+            success: true,
+            messageId: req.params.messageId,
+            mimetype,
+            mime: mimetype,
+            data: Buffer.from(buffer).toString('base64'),
+            base64: Buffer.from(buffer).toString('base64'),
+            fileName: meta.fileName,
+            mediaType: meta.mediaType,
+        });
+    } catch (err) {
+        console.error('❌ Erreur média:', err.message);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// ── Photo de profil / groupe ────────────────────────────────────────────────
+app.get('/api/whatsapp/profile-picture/:jid', async (req, res) => {
+    if (!waConnected || !waSocket) {
+        return res.status(503).json({ success: false, error: 'WhatsApp non connecté', status: waStatus });
+    }
+    try {
+        const jid = decodeURIComponent(req.params.jid);
+        const url = await getProfilePicture(jid);
+        if (!url) return res.status(404).json({ success: false, error: 'Photo non disponible', jid });
+        res.json({ success: true, jid, url, picture: url, profilePicUrl: url });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
     }
 });
 
@@ -485,10 +678,14 @@ app.get('/api/whatsapp/groups', async (_req, res) => {
         // Mettre à jour le cache
         cachedGroups = rawGroups;
 
-        const groups = Object.entries(rawGroups).map(([id, g]) => ({
+        const groups = await Promise.all(Object.entries(rawGroups).map(async ([id, g]) => ({
             id,
+            jid:          id,
             name:         g.subject ?? id,
+            subject:      g.subject ?? id,
             isGroup:      true,
+            picture:      await getProfilePicture(id),
+            profilePicUrl: await getProfilePicture(id),
             participants: g.participants?.map(p => ({
                 id:     p.id,
                 admin:  p.admin ?? null,
@@ -497,7 +694,7 @@ app.get('/api/whatsapp/groups', async (_req, res) => {
             creation:     g.creation ?? null,
             owner:        g.owner ?? null,
             desc:         g.desc ?? '',
-        }));
+        })));
 
         console.log(`👥 ${groups.length} groupes récupérés`);
         res.json({ success: true, groups, total: groups.length });
@@ -537,6 +734,8 @@ app.post('/api/whatsapp/logout', async (_req, res) => {
         cachedChats    = [];
         cachedContacts = {};
         cachedGroups   = {};
+        cachedMessages = [];
+        mediaMessages  = new Map();
 
         fs.rmSync(AUTH_DIR, { recursive: true, force: true });
         fs.mkdirSync(AUTH_DIR, { recursive: true });
