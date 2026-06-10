@@ -5583,102 +5583,125 @@
         var RAILWAY_API = window.location.origin + '/api';
         var RAILWAY_WS  = window.location.origin;
 
-        // ── SOCKET.IO HUB PERMANENT (messages temps réel) ─────────────
-        var waSocket = null;
+        // ── AUTO-DÉTECTION PRÉFIXE API (teste /api/whatsapp/status sinon /whatsapp/status) ──
+        (function detectApiPrefix(){
+            fetch(RAILWAY_API + '/whatsapp/status')
+                .then(function(r){ if(r.status === 404) throw new Error('not found'); return r; })
+                .catch(function(){
+                    // Fallback: essayer sans /api
+                    fetch(window.location.origin + '/whatsapp/status')
+                        .then(function(r){ if(!r.ok) throw new Error(); return r.json(); })
+                        .then(function(){ RAILWAY_API = window.location.origin; console.log('✅ API prefix: /whatsapp (sans /api)'); })
+                        .catch(function(){ console.warn('⚠️ API Railway non détectée — endpoints 404'); });
+                });
+        })();
+
+        // ── WEBSOCKET NATIF HUB PERMANENT (Baileys — sans Socket.IO) ─────
+        var waSocket = null; // alias de compatibilité (non utilisé)
+        var waHubWs = null, waHubWsRetry = null;
 
         function waHubConnect() {
-            if (waSocket && waSocket.connected) return;
-            // Charger Socket.IO depuis le serveur
-            var script = document.createElement('script');
-            script.src = RAILWAY_WS + '/socket.io/socket.io.js';
-            script.onload = function() {
-                waSocket = io(RAILWAY_WS, { transports: ['polling','websocket'], reconnection: true, reconnectionDelay: 3000, reconnectionAttempts: 10 });
+            if (waHubWs && (waHubWs.readyState === 0 || waHubWs.readyState === 1)) return;
+            waHubConnectWsNatif();
+        }
 
-                waSocket.on('connect', function() {
-                    console.log('🟢 Socket.IO connecté');
-                });
+        function waHubConnectWsNatif() {
+            if (waHubWs) { try { waHubWs.close(); } catch(e){} waHubWs = null; }
+            if (waHubWsRetry) { clearTimeout(waHubWsRetry); waHubWsRetry = null; }
 
-                waSocket.on('whatsapp_status', function(d) {
+            // Construire URL WebSocket depuis l'origine HTTP/HTTPS
+            var wsUrl = RAILWAY_WS.replace(/^https?:\/\//, function(p){ return p==='https://'?'wss://':'ws://'; }) + '/ws';
+            console.log('🔌 WS Baileys → ' + wsUrl);
+
+            try { waHubWs = new WebSocket(wsUrl); } catch(e) { console.warn('WS init error', e); waHubWsScheduleRetry(); return; }
+
+            waHubWs.onopen = function() {
+                console.log('🟢 WebSocket Baileys connecté');
+            };
+
+            waHubWs.onmessage = function(evt) {
+                var d;
+                try { d = JSON.parse(evt.data); } catch(e) { return; }
+
+                // ── Event: statut connexion WhatsApp ──
+                if (d.type === 'whatsapp_status' || d.event === 'whatsapp_status') {
+                    var payload = d.data || d;
                     var strip    = document.getElementById('wawConnStrip');
                     var qrCard   = document.getElementById('waActQrCard');
                     var connCard = document.getElementById('waActConnCard');
-                    if (d.status === 'connected') {
-                        // Barre de statut
+                    if (payload.status === 'connected' || payload.status === 'open') {
                         if (strip) strip.style.display = 'flex';
-                        var ph = document.getElementById('waConnPhone');
-                        // Extraire le numéro depuis waInfo si disponible
-                        var phone = d.phone || (d.info && d.info.wid && d.info.wid.user) || '';
-                        var name  = d.name  || (d.info && d.info.pushname) || '';
+                        var ph    = document.getElementById('waConnPhone');
+                        var phone = payload.phone || (payload.info && payload.info.wid && payload.info.wid.user) || '';
+                        var name  = payload.name  || (payload.info && payload.info.pushname) || '';
                         if (ph && phone) ph.textContent = '+' + phone + (name ? ' · ' + name : '');
-                        // Cacher carte QR, montrer carte connecté
                         if (qrCard)   qrCard.style.display   = 'none';
                         if (connCard) connCard.style.display  = 'block';
                         var connPhone = document.getElementById('waActConnPhone');
                         if (connPhone) connPhone.textContent = phone || 'Connecté';
-                        // Persistance + chargement chats
                         if (!waMyPhone && phone) {
                             waMyPhone = '+' + phone;
                             localStorage.setItem('kmWaPhone', waMyPhone);
                             waApplyState();
                         }
                         waActQrDone = true;
-                        waActQrStopProgress();
-                        waActQrStopRest();
-                    } else if (d.status === 'qr') {
+                        if (typeof waActQrStopProgress === 'function') waActQrStopProgress();
+                        if (typeof waActQrStopRest    === 'function') waActQrStopRest();
+                    } else if (payload.status === 'qr') {
                         if (strip)    strip.style.display    = 'none';
                         if (connCard) connCard.style.display = 'none';
                     } else {
                         if (strip) strip.style.display = 'none';
                     }
-                });
+                }
 
-                waSocket.on('whatsapp_qr', function(d) {
-                    if (d.qr) {
-                        waQrBase64 = d.qr;
-                        // Afficher la carte QR et l'écran
+                // ── Event: QR code ──
+                if (d.type === 'whatsapp_qr' || d.event === 'whatsapp_qr' || d.type === 'qr') {
+                    var qr = (d.data && (d.data.qr || d.data.qrCode)) || d.qr || d.qrCode || '';
+                    if (qr) {
+                        waQrBase64 = qr;
                         var screen = document.getElementById('waActScreen');
                         var card   = document.getElementById('waActQrCard');
                         if (screen) screen.classList.remove('hidden');
                         if (card)   card.style.display = 'block';
-                        // Utiliser waActQrShowImg qui gère spinner + image correctement
-                        if (typeof waActQrShowImg === 'function') {
-                            waActQrShowImg(d.qr);
-                        } else {
-                            var img = document.getElementById('waActQrImg');
+                        if (typeof waActQrShowImg === 'function') waActQrShowImg(qr);
+                        else {
+                            var img  = document.getElementById('waActQrImg');
                             var spin = document.getElementById('waActQrSpinner');
-                            if (img)  { img.src = d.qr; img.style.display = 'block'; }
+                            if (img)  { img.src = qr.startsWith('data:')?qr:'data:image/png;base64,'+qr; img.style.display='block'; }
                             if (spin) spin.style.display = 'none';
                         }
                     }
-                });
+                }
 
-                waSocket.on('whatsapp_message', function(data) {
-                    waHubHandleMessage(data);
-                });
+                // ── Event: message entrant ──
+                if (d.type === 'whatsapp_message' || d.type === 'message' || d.event === 'whatsapp_message') {
+                    waHubHandleMessage(d.data || d);
+                }
 
-                waSocket.on('whatsapp_media_ready', function(data) {
-                    // Mettre à jour le message avec le média reçu
-                    if (data.chatId && data.data) {
-                        var msgs = waDB_loadMsgs(data.chatId);
-                        var m = msgs.find(function(x){ return x.id === data.msgId; });
-                        if (m) { m.mediaData = data.data; m.mediaMime = data.mimetype; waDB_saveMsgs(data.chatId, msgs); }
-                        if (data.chatId === wawActiveChatId) wawRenderMsgsFromDB();
+                // ── Event: média prêt ──
+                if (d.type === 'whatsapp_media_ready') {
+                    var md = d.data || d;
+                    if (md.chatId && md.data) {
+                        var msgs = waDB_loadMsgs(md.chatId);
+                        var m = msgs.find(function(x){ return x.id === md.msgId; });
+                        if (m) { m.mediaData = md.data; m.mediaMime = md.mimetype; waDB_saveMsgs(md.chatId, msgs); }
+                        if (md.chatId === wawActiveChatId) wawRenderMsgsFromDB();
                     }
-                });
+                }
+            };
 
-                waSocket.on('disconnect', function() {
-                    console.log('🔴 Socket.IO déconnecté');
-                });
+            waHubWs.onerror = function(e) { console.warn('🔴 WS error', e); };
+            waHubWs.onclose = function(e) {
+                console.log('🔴 WS fermé — code:' + e.code + ' — retry dans 5s');
+                waHubWsScheduleRetry();
             };
-            script.onerror = function() {
-                console.warn('Socket.IO indisponible');
-            };
-            document.head.appendChild(script);
         }
 
-        // WebSocket natif supprimé — Socket.IO gère tout (compatible Northflank)
-        var waHubWs = null, waHubWsRetry = null;
-        function waHubConnectWsNatif() { /* désactivé */ }
+        function waHubWsScheduleRetry() {
+            if (waHubWsRetry) return;
+            waHubWsRetry = setTimeout(function() { waHubWsRetry = null; waHubConnectWsNatif(); }, 5000);
+        }
 
         // ── HANDLER MESSAGE ENTRANT (WebSocket temps réel) ────────────
         function waHubHandleMessage(data) {
@@ -5790,16 +5813,9 @@
         }
 
         function waActQrConnectWS(){
-            // Socket.IO uniquement — WebSocket natif supprimé (incompatible Northflank)
+            // WebSocket natif Baileys — pas besoin de Socket.IO
             waActQrSetSpinner('En attente QR…');
-            if (typeof io !== 'undefined') {
-                waHubConnect();
-            } else {
-                var s = document.createElement('script');
-                s.src = RAILWAY_WS + '/socket.io/socket.io.js';
-                s.onload = function(){ waHubConnect(); };
-                document.head.appendChild(s);
-            }
+            waHubConnect();
             waActQrFallbackRest();
         }
 
@@ -5867,7 +5883,7 @@
             waActQrStopProgress();
             waActQrDone = false;
             // Ne PAS appeler waActQrInit() — le serveur génère automatiquement un nouveau QR
-            // On attend via Socket.IO + REST poll déjà actif
+            // On attend via WebSocket Baileys + REST poll déjà actif
             if(!waActQrRestPoll) waActQrFallbackRest();
         }
         function waActQrSetSpinner(txt){
@@ -6240,46 +6256,78 @@
         }
 
         // ── FETCH INBOX (tous les messages récents depuis Railway) ───
+        // Essaie /messages d'abord, puis fallback /chats si 404
         function wawFetchInbox(manual){
-            fetch(RAILWAY_API+'/whatsapp/messages')
-                .then(function(r){return r.json();})
-                .then(function(data){
-                    if(!data.success) { if(manual) toast('⚠️ '+(data.error||'Erreur'),'var(--amber)'); return; }
-                    var summary = data.chats || {};
-                    var totalAdded = 0;
-                    var chats = waDB_loadChats();
+            function processInboxData(data){
+                // Accepte { success, chats:{jid:{body,ts,pushName,fromMe,id}} }
+                // ou tableau direct [{from,body,ts,...}]
+                // ou { chats:[...] }
+                var totalAdded = 0;
+                var dbChats = waDB_loadChats();
 
+                if (data && typeof data === 'object' && !Array.isArray(data) && data.chats && !Array.isArray(data.chats)) {
+                    // Format dict: { jid: {body,ts,...} }
+                    var summary = data.chats;
                     Object.keys(summary).forEach(function(cid){
                         var m = summary[cid];
                         var num = waJidToNum(cid);
                         var name = m.pushName || num;
-
-                        // Créer le chat si absent
-                        if(!chats.find(function(c){ return (c.umId||c.phone||c.id)===cid||c.phone===num; })){
-                            chats.push({ id:'api_'+Date.now()+'_'+num, umId:cid, phone:num,
-                                emoji: cid.indexOf('@g.us')!==-1?'👥':'👤',
-                                name: name, isGroup: cid.indexOf('@g.us')!==-1 });
+                        if(!dbChats.find(function(c){ return (c.umId||c.phone||c.id)===cid||c.phone===num; })){
+                            dbChats.push({ id:'api_'+Date.now()+'_'+num, umId:cid, phone:num,
+                                emoji: cid.indexOf('@g.us')!==-1?'👥':'👤', name:name, isGroup:cid.indexOf('@g.us')!==-1 });
                         }
                         var ts = m.ts || 0;
                         var d2 = ts ? new Date(ts*1000) : new Date();
-                        var entry = {
-                            id: m.id||(''+(ts||Date.now())+cid),
-                            from: name, body: m.body||'', fromMe: !!m.fromMe,
-                            ts: ts,
-                            time: d2.toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'}),
-                            date: d2.toLocaleDateString('fr-FR'),
-                            read: (cid===wawActiveChatId), delivered: true
-                        };
-                        var added = waDB_mergeMsgs(cid, [entry]);
-                        totalAdded += added;
+                        var entry = { id:m.id||(''+(ts||Date.now())+cid), from:name, body:m.body||'', fromMe:!!m.fromMe,
+                            ts:ts, time:d2.toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'}),
+                            date:d2.toLocaleDateString('fr-FR'), read:(cid===wawActiveChatId), delivered:true };
+                        totalAdded += waDB_mergeMsgs(cid, [entry]);
                     });
+                } else {
+                    // Format tableau ou { chats:[] }
+                    var arr = Array.isArray(data) ? data : (Array.isArray(data.chats) ? data.chats : (Array.isArray(data.messages)?data.messages:[]));
+                    arr.forEach(function(m){
+                        var cid = m.chatId || m.from || '';
+                        if (!cid) return;
+                        var num = waJidToNum(cid);
+                        var name = m.pushName || m.name || num;
+                        if(!dbChats.find(function(c){ return (c.umId||c.phone||c.id)===cid||c.phone===num; })){
+                            dbChats.push({ id:'api_'+Date.now()+'_'+num, umId:cid, phone:num,
+                                emoji:cid.indexOf('@g.us')!==-1?'👥':'👤', name:name, isGroup:cid.indexOf('@g.us')!==-1 });
+                        }
+                        var ts = m.ts || m.timestamp || 0;
+                        var d2 = ts ? new Date(ts*1000) : new Date();
+                        var entry = { id:m.id||(''+(ts||Date.now())+cid), from:name, body:m.body||m.message||'',
+                            fromMe:!!m.fromMe, ts:ts, time:d2.toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'}),
+                            date:d2.toLocaleDateString('fr-FR'), read:(cid===wawActiveChatId), delivered:true };
+                        totalAdded += waDB_mergeMsgs(cid, [entry]);
+                    });
+                }
 
-                    waDB_saveChats(chats);
-                    wawBuildAllChats(); wawRenderChatList(); wawUpdateTotalBadge();
-                    if(wawActiveChatId) wawRenderMsgsFromDB();
-                    if(manual) toast(totalAdded?'✅ '+totalAdded+' nouveau(x) message(s)':'Aucun nouveau message','#25D366');
+                waDB_saveChats(dbChats);
+                wawBuildAllChats(); wawRenderChatList(); wawUpdateTotalBadge();
+                if(wawActiveChatId) wawRenderMsgsFromDB();
+                if(manual) toast(totalAdded?'✅ '+totalAdded+' nouveau(x) message(s)':'Aucun nouveau message','#25D366');
+            }
+
+            fetch(RAILWAY_API+'/whatsapp/messages')
+                .then(function(r){
+                    if(r.status === 404) throw new Error('404_messages');
+                    return r.json();
                 })
-                .catch(function(e){ if(manual) toast('⚠️ Erreur inbox: '+e.message,'var(--amber)'); });
+                .then(function(data){
+                    if(data && (data.success === false) && !data.chats) {
+                        throw new Error('no_data');
+                    }
+                    processInboxData(data);
+                })
+                .catch(function(e){
+                    // Fallback: essayer /whatsapp/chats
+                    fetch(RAILWAY_API+'/whatsapp/chats')
+                        .then(function(r){ if(!r.ok) throw new Error('chats_404'); return r.json(); })
+                        .then(function(data){ processInboxData(data); })
+                        .catch(function(e2){ if(manual) toast('⚠️ Inbox indisponible — messages en temps réel via WS','var(--amber)'); });
+                });
         }
 
         
