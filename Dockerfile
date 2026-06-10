@@ -6,8 +6,9 @@ FROM node:20-slim
 
 WORKDIR /app
 
-# ── Dépendances système minimales (Baileys n'a pas besoin de Chrome) ──────────
+# ── Dépendances système (Baileys build + SSL certs) ───────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
