@@ -6058,6 +6058,99 @@
             }
         }
 
+        function wawRenderMediaContent(m) {
+            // If we have base64 media data
+            if (m.mediaData) {
+                var mime = m.mediaMime || '';
+                var src = m.mediaData.startsWith('data:') ? m.mediaData : 'data:' + mime + ';base64,' + m.mediaData;
+                if (mime.startsWith('image/') || m.mediaType === 'image') {
+                    return '<div class="waw-media-wrap"><img src="'+src+'" class="waw-media-img" onclick="wawOpenMedia(this.src,\'image\')" loading="lazy" style="max-width:260px;max-height:260px;border-radius:10px;display:block;cursor:zoom-in;object-fit:cover"></div>';
+                }
+                if (mime.startsWith('video/') || m.mediaType === 'video') {
+                    return '<div class="waw-media-wrap"><video controls src="'+src+'" style="max-width:260px;max-height:200px;border-radius:10px;display:block"></video></div>';
+                }
+                if (mime.startsWith('audio/') || m.mediaType === 'audio' || m.mediaType === 'ptt') {
+                    return '<div class="waw-audio-wrap" style="display:flex;align-items:center;gap:8px;background:rgba(255,255,255,.06);border-radius:20px;padding:8px 12px;min-width:200px">'
+                        +'<div style="width:36px;height:36px;border-radius:50%;background:#25D366;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:16px">'+(m.mediaType==='ptt'?'🎤':'🎵')+'</div>'
+                        +'<audio controls src="'+src+'" style="flex:1;height:32px;max-width:180px"></audio></div>';
+                }
+                // Document / PDF
+                var fname = m.caption || m.fileName || ('document.' + (mime.split('/')[1]||'bin'));
+                return '<div class="waw-doc-wrap" style="display:flex;align-items:center;gap:10px;background:rgba(255,255,255,.06);border-radius:10px;padding:10px 12px;cursor:pointer;min-width:200px" onclick="wawDownloadMedia(\''+src+'\',\''+fname+'\',\''+mime+'\')">'
+                    +'<div style="width:36px;height:36px;border-radius:8px;background:rgba(212,133,58,.2);display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0">📄</div>'
+                    +'<div style="flex:1;min-width:0"><div style="font-size:12px;color:#e9edef;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+fname+'</div>'
+                    +'<div style="font-size:9px;color:#8696a0;font-family:var(--mono)">'+mime+'</div></div>'
+                    +'<div style="font-size:14px;color:#25D366">⬇</div></div>';
+            }
+            // Media placeholder — show a clickable card that requests media download
+            var icon = '📎'; var label = 'Média';
+            var mt = m.mediaType || '';
+            if (mt === 'image') { icon = '🖼️'; label = 'Image'; }
+            else if (mt === 'video') { icon = '🎬'; label = 'Vidéo'; }
+            else if (mt === 'audio' || mt === 'ptt') { icon = mt==='ptt'?'🎤':'🎵'; label = mt==='ptt'?'Vocal':'Audio'; }
+            else if (mt === 'document') { icon = '📄'; label = 'Document'; }
+            else if (mt === 'sticker') { icon = '😊'; label = 'Sticker'; }
+            var caption = m.caption ? '<div style="font-size:11px;color:#e9edef;margin-top:4px">'+m.caption.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</div>' : '';
+            return '<div class="waw-media-placeholder" onclick="wawRequestMedia(\''+m.id+'\',this)" '
+                +'style="display:flex;align-items:center;gap:8px;background:rgba(255,255,255,.07);border:1px dashed rgba(255,255,255,.15);border-radius:10px;padding:10px 14px;cursor:pointer;min-width:180px;transition:all .2s" '
+                +'onmouseover="this.style.background=\'rgba(37,211,102,.08)\';this.style.borderColor=\'rgba(37,211,102,.3)\'" '
+                +'onmouseout="this.style.background=\'rgba(255,255,255,.07)\';this.style.borderColor=\'rgba(255,255,255,.15)\'">'
+                +'<div style="font-size:26px">'+icon+'</div>'
+                +'<div><div style="font-size:11px;color:#e9edef;font-weight:600">'+label+'</div>'
+                +'<div style="font-size:9px;color:#8696a0;font-family:var(--mono)">Appuyer pour charger</div></div>'
+                +'<div style="margin-left:auto;font-size:12px;color:#25D366">▶</div>'
+                +'</div>'+caption;
+        }
+
+        function wawRequestMedia(msgId, el) {
+            if (!el) return;
+            el.innerHTML = '<div style="font-size:11px;color:#25D366;font-family:var(--mono)">⏳ Chargement…</div>';
+            fetch(RAILWAY_API+'/whatsapp/media/'+encodeURIComponent(msgId))
+                .then(function(r){return r.json();})
+                .then(function(d){
+                    if (d.data || d.base64) {
+                        var chatId = wawActiveChatId;
+                        var msgs = waDB_loadMsgs(chatId);
+                        var m = msgs.find(function(x){return x.id===msgId;});
+                        if (m) {
+                            m.mediaData = d.data || d.base64;
+                            m.mediaMime = d.mimetype || d.mime || m.mediaMime || 'application/octet-stream';
+                            waDB_saveMsgs(chatId, msgs);
+                            wawRenderMsgsFromDB();
+                        } else {
+                            el.innerHTML = '<div style="font-size:10px;color:#e85555">Introuvable</div>';
+                        }
+                    } else {
+                        el.innerHTML = '<div style="font-size:10px;color:#e85555">Erreur: '+(d.error||'no data')+'</div>';
+                    }
+                })
+                .catch(function(){
+                    el.innerHTML = '<div style="font-size:10px;color:#e85555">Erreur réseau</div>';
+                });
+        }
+
+        function wawOpenMedia(src, type) {
+            var ov = document.createElement('div');
+            ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.9);z-index:99999;display:flex;align-items:center;justify-content:center;cursor:zoom-out';
+            ov.onclick = function(){ document.body.removeChild(ov); };
+            var img = document.createElement('img');
+            img.src = src;
+            img.style.cssText = 'max-width:90vw;max-height:90vh;border-radius:8px;box-shadow:0 8px 40px rgba(0,0,0,.8)';
+            // Download button
+            var dl = document.createElement('a');
+            dl.href = src; dl.download = 'media_'+Date.now()+'.jpg';
+            dl.style.cssText = 'position:absolute;top:20px;right:20px;background:#25D366;color:#fff;border:none;border-radius:8px;padding:8px 16px;font-size:13px;font-weight:700;cursor:pointer;text-decoration:none';
+            dl.textContent = '⬇ Télécharger';
+            dl.onclick = function(e){ e.stopPropagation(); };
+            ov.appendChild(img); ov.appendChild(dl);
+            document.body.appendChild(ov);
+        }
+
+        function wawDownloadMedia(src, fname, mime) {
+            var a = document.createElement('a');
+            a.href = src; a.download = fname; a.click();
+        }
+
         function wawRenderMsgs(msgs){
             var c = document.getElementById('wawMsgs');
             if (!msgs || !msgs.length) {
@@ -6069,17 +6162,22 @@
             var html = msgs.map(function(m){
                 var isSent = m.fromMe===true||m.fromMe==='true'||m.fromMe===1;
                 var rawBody = m.body||m.message||'';
-                var body = rawBody.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
+                // Remove [media] tag — we'll render the actual media widget instead
+                var isMediaMsg = m.hasMedia || m.mediaData || m.mediaType || rawBody.trim()==='[media]';
+                var cleanBody = rawBody.replace(/^\[media\]$/i,'').trim();
+                var body = cleanBody.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
                 // Highlight search term
-                if(q) body = body.replace(new RegExp('('+q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+')','gi'),'<mark style="background:rgba(212,133,58,.5);color:#000;border-radius:2px;padding:0 1px">$1</mark>');
+                if(q && body) body = body.replace(new RegExp('('+q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+')','gi'),'<mark style="background:rgba(212,133,58,.5);color:#000;border-radius:2px;padding:0 1px">$1</mark>');
                 var ts   = m.time||(m.ts?new Date(m.ts*1000).toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'}):'');
                 var date = m.date||(m.ts?new Date(m.ts*1000).toLocaleDateString('fr-FR'):'');
                 var author = (!isSent&&m.from&&m.from!==wawActiveChatName)?'<div class="waw-bubble-author">'+m.from+'</div>':'';
                 var sep = '';
                 if (date && date !== lastDate) { lastDate=date; sep='<div class="waw-date-sep"><span>'+date+'</span></div>'; }
                 var tick = isSent ? '<span class="waw-bubble-tick" style="color:'+(m.delivered?'#53bdeb':'#8696a0')+'">'+(m.delivered?'✓✓':'✓')+'</span>' : '';
+                var mediaHtml = isMediaMsg ? wawRenderMediaContent(m) : '';
+                var textHtml = body ? '<div class="waw-bubble-text">'+body+'</div>' : '';
                 return sep+'<div class="waw-msg-wrap '+(isSent?'sent':'recv')+'" data-mid="'+m.id+'">'
-                    +'<div class="waw-bubble">'+author+body
+                    +'<div class="waw-bubble">'+author+mediaHtml+textHtml
                     +'<div class="waw-bubble-meta">'
                     +'<span class="waw-bubble-time">'+ts+'</span>'+tick
                     +'</div></div></div>';
@@ -6113,7 +6211,13 @@
                             ts: m.timestamp||0,
                             time: m.timestamp?new Date(m.timestamp*1000).toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'}):(m.time||''),
                             date: m.timestamp?new Date(m.timestamp*1000).toLocaleDateString('fr-FR'):(m.date||''),
-                            read: true, delivered: true
+                            read: true, delivered: true,
+                            hasMedia: !!m.hasMedia,
+                            mediaType: m.mediaType || m.type || null,
+                            mediaMime: m.mimetype || m.mime || null,
+                            mediaData: m.mediaData || m.base64 || null,
+                            caption: m.caption || null,
+                            fileName: m.fileName || null
                         };
                     });
                     var added = waDB_mergeMsgs(wawActiveChatId, normalized);
@@ -6786,18 +6890,7 @@
                         </button>
                     </div>
                 </div>
-                <!-- Manual phone fallback -->
-                <div class="wa-act-card">
-                    <div class="wa-act-num">2</div>
-                    <div class="wa-act-ct">
-                        <div class="wa-act-ct-title">Ou entrez votre numéro manuellement</div>
-                        <div style="font-size:10px;color:#8696a0;font-family:var(--mono);margin-bottom:8px">Via Railway · ex: +243812345678</div>
-                        <input class="wa-inp-field" id="waMyPhone" placeholder="+243812345678" type="tel">
-                        <button class="wa-act-submit" onclick="waActivate()">
-                            <i class="fab fa-whatsapp"></i> Connecter manuellement
-                        </button>
-                    </div>
-                </div>
+
             </div>
         </div>
 
@@ -6923,6 +7016,12 @@
     .waw-gr-name{font-size:12px;font-weight:600;color:#e9edef;display:flex;justify-content:space-between}
     .waw-gr-time{font-size:9px;color:#8696a0;font-family:var(--mono)}
     .waw-gr-prev{font-size:10px;color:#8696a0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}
+    /* Media in bubbles */
+    .waw-media-wrap{margin-bottom:4px}
+    .waw-media-img{transition:opacity .2s;border-radius:10px;display:block}
+    .waw-media-img:hover{opacity:.88}
+    .waw-bubble-text{margin-top:2px}
+    .waw-audio-wrap audio{accent-color:#25D366}
     </style>
 
     <!-- AI FAB -->
