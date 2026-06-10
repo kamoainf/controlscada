@@ -1,0 +1,54 @@
+<!-- KAMOA SCADA v3 — WhatsApp Integration Setup -->
+<script src="./whatsapp-integration.js"></script>
+<script>
+    // Initialiser WhatsAppIntegration au lieu de Socket.IO
+    let waClient = null;
+
+    document.addEventListener('DOMContentLoaded', () => {
+        // Créer instance WhatsAppIntegration
+        waClient = new WhatsAppIntegration({
+            baseUrl: window.location.origin,
+        });
+
+        // Écouter les événements
+        waClient.on('status', (data) => {
+            console.log('📱 WhatsApp status:', data.status, data.phone);
+            // Ici tu peux mettre à jour le UI avec le statut
+        });
+
+        waClient.on('qr', (data) => {
+            console.log('📲 QR Code reçu');
+            if (data.qr && typeof showQRModal === 'function') {
+                showQRModal(data.qr);
+            }
+        });
+
+        waClient.on('message', (data) => {
+            console.log('📩 Message entrant:', data);
+            // Traiter les messages entrants
+        });
+
+        waClient.on('error', (data) => {
+            console.error('❌ WhatsApp error:', data.message);
+        });
+
+        // Démarrer l'intégration
+        waClient.init();
+    });
+
+    // Fonction pour initier la connexion WhatsApp
+    async function startWhatsAppQR() {
+        console.log('🔄 Démarrage WhatsApp...');
+        const res = await fetch(`${window.location.origin}/api/whatsapp/init`, { method: 'POST' });
+        const data = await res.json();
+        console.log('Init response:', data);
+    }
+
+    // Fonction pour envoyer un message
+    async function sendWhatsAppMessage(phoneNumber, messageText) {
+        if (!waClient) return alert('WhatsApp non initialisé');
+        const result = await waClient.sendMessage(phoneNumber, messageText);
+        console.log('Send result:', result);
+        return result;
+    }
+</script>
