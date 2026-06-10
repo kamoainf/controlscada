@@ -109,7 +109,7 @@ async function initWhatsApp() {
             printQRInTerminal:             true,
             browser:                       ['KAMOA SCADA', 'Chrome', '120.0'],
             generateHighQualityLinkPreview: false,
-            syncFullHistory:               true,
+            syncFullHistory:               false,
             markOnlineOnConnect:           false,
             connectTimeoutMs:              60_000,
             defaultQueryTimeoutMs:         30_000,
@@ -313,7 +313,7 @@ app.use(cors({
     allowedHeaders: ['Content-Type', 'Authorization', 'x-api-key'],
 }));
 app.options('*', cors());
-app.use(bodyParser.json({ limit: '75mb' }));
+app.use(bodyParser.json({ limit: '10mb' }));
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(express.static('./'));
 
@@ -518,90 +518,50 @@ app.post('/api/whatsapp/send-group', async (req, res) => {
     }
 });
 
-// ── Envoyer un média (image / vidéo / document via URL ou base64) ─────────────
+// ── Envoyer un média (image / document via URL) ───────────────────────────────
 app.post('/api/whatsapp/send-media', async (req, res) => {
-    const { to, mediaUrl, dataUrl, base64, mimetype = '', mediaType = 'image', caption = '', filename } = req.body || {};
-    const source = mediaUrl || dataUrl || base64;
-    if (!to || !source) {
-        return res.status(400).json({ success:false, error: 'Champs requis: to + mediaUrl/dataUrl/base64' });
+    const { to, mediaUrl, mediaType = 'image', caption = '', filename } = req.body;
+    if (!to || !mediaUrl) {
+        return res.status(400).json({ error: 'Champs requis: to, mediaUrl' });
     }
     if (!waConnected || !waSocket) {
-        return res.status(503).json({ success:false, error: 'WhatsApp non connecté', status: waStatus, needQr: waStatus !== 'open' });
+        return res.status(503).json({ error: 'WhatsApp non connecté', status: waStatus });
     }
     try {
         const jid = String(to).includes('@g.us') ? toGroupJid(to) : toJid(to);
-        let buffer = null;
-        let finalMime = mimetype || 'image/jpeg';
-
-        if (String(source).startsWith('data:')) {
-            const match = String(source).match(/^data:([^;]+);base64,(.+)$/);
-            if (!match) throw new Error('Format dataUrl invalide');
-            finalMime = match[1] || finalMime;
-            buffer = Buffer.from(match[2], 'base64');
-        } else if (base64 && !String(base64).startsWith('http')) {
-            buffer = Buffer.from(String(base64).replace(/^data:[^,]+,/, ''), 'base64');
-        }
 
         let msgContent;
-        const type = String(mediaType || '').toLowerCase();
-        const input = buffer ? buffer : { url: source };
-        if (type === 'document' || finalMime === 'application/pdf' || filename) {
-            msgContent = { document: input, mimetype: finalMime || 'application/octet-stream', fileName: filename || 'document', caption };
-        } else if (type === 'video' || finalMime.startsWith('video/')) {
-            msgContent = { video: input, mimetype: finalMime || undefined, caption };
+        if (mediaType === 'document') {
+            msgContent = {
+                document: { url: mediaUrl },
+                mimetype: 'application/octet-stream',
+                fileName: filename ?? 'document',
+                caption,
+            };
+        } else if (mediaType === 'video') {
+            msgContent = { video: { url: mediaUrl }, caption };
         } else {
-            msgContent = { image: input, mimetype: finalMime || undefined, caption };
+            // image par défaut
+            msgContent = { image: { url: mediaUrl }, caption };
         }
 
-        const result = await withTimeout(waSocket.sendMessage(jid, msgContent), 60_000, 'sendMedia');
+        const result = await withTimeout(
+            waSocket.sendMessage(jid, msgContent),
+            30_000, 'sendMedia'
+        );
         const messageId = result?.key?.id ?? 'sent';
-        console.log(`✅ Média envoyé à ${jid} — id: ${messageId}`);
-        res.json({ success: true, messageId, id: messageId, status: 'sent', mediaType: type || 'image' });
+        console.log(`✅ Média (${mediaType}) envoyé à ${to} — id: ${messageId}`);
+        res.json({ success: true, messageId, status: 'sent', mediaType });
     } catch (err) {
-        console.error(`❌ Erreur envoi média:`, err);
-        res.status(500).json({ success:false, error: err.message });
-    }
-});
-
-// Compatibilité frontend: endpoint base64 dédié
-app.post('/api/whatsapp/send-media-base64', async (req, res) => {
-    const body = req.body || {};
-    const { to, caption = '', filename = '' } = body;
-    const dataUrl = body.dataUrl || body.mediaData || body.base64;
-    const mimetype = body.mimetype || body.mime || (String(dataUrl).match(/^data:([^;]+);base64,/)||[])[1] || 'image/jpeg';
-    const mediaType = body.mediaType || (mimetype.startsWith('video/') ? 'video' : mimetype.startsWith('application/') ? 'document' : 'image');
-    if (!to || !dataUrl) return res.status(400).json({ success:false, error:'Champs requis: to + dataUrl/base64' });
-    if (!waConnected || !waSocket) return res.status(503).json({ success:false, error:'WhatsApp non connecté', status:waStatus, needQr:waStatus !== 'open' });
-    try {
-        const jid = String(to).includes('@g.us') ? toGroupJid(to) : toJid(to);
-        const raw = String(dataUrl).replace(/^data:[^,]+,/, '');
-        const buffer = Buffer.from(raw, 'base64');
-        let content;
-        if (mediaType === 'document') content = { document: buffer, mimetype, fileName: filename || 'document', caption };
-        else if (mediaType === 'video') content = { video: buffer, mimetype, caption };
-        else content = { image: buffer, mimetype, caption };
-        const result = await withTimeout(waSocket.sendMessage(jid, content), 60_000, 'sendMediaBase64');
-        const messageId = result?.key?.id || 'sent';
-        res.json({ success:true, messageId, id:messageId, status:'sent', mediaType });
-    } catch(err) {
-        console.error('❌ send-media-base64:', err);
-        res.status(500).json({ success:false, error:err.message });
+        console.error(`❌ Erreur envoi média à ${to}:`, err.message);
+        res.status(500).json({ error: err.message });
     }
 });
 
 // ── Récupérer tous les chats (groupes + contacts) ─────────────────────────────
 app.get('/api/whatsapp/chats', async (_req, res) => {
-    if (!waInitialized) initWhatsApp().catch(() => {});
     if (!waConnected || !waSocket) {
-        // Ne pas retourner 503: le frontend doit rester propre pendant le scan QR / reconnexion.
-        return res.json({
-            success: false,
-            error: 'WhatsApp non connecté',
-            status: waStatus,
-            chats: cachedChats || [],
-            total: (cachedChats || []).length,
-            needQr: waStatus !== 'open'
-        });
+        return res.status(503).json({ success: false, error: 'WhatsApp non connecté', status: waStatus, chats: [] });
     }
     try {
         await refreshGroupsCache();
@@ -642,10 +602,8 @@ app.get('/api/whatsapp/chats', async (_req, res) => {
 
 // ── Récupérer les messages récents ou ceux d'une conversation ────────────────
 app.get('/api/whatsapp/messages', async (req, res) => {
-    if (!waInitialized) initWhatsApp().catch(() => {});
     if (!waConnected || !waSocket) {
-        // 200 volontaire: évite les erreurs rouges côté navigateur pendant la reconnexion.
-        return res.json({ success: false, error: 'WhatsApp non connecté', status: waStatus, messages: [], needQr: waStatus !== 'open' });
+        return res.status(503).json({ success: false, error: 'WhatsApp non connecté', status: waStatus, messages: [] });
     }
     try {
         const chatId = req.query.chatId ? String(req.query.chatId) : '';
@@ -660,19 +618,14 @@ app.get('/api/whatsapp/messages', async (req, res) => {
 // ── Télécharger un média reçu ────────────────────────────────────────────────
 app.get('/api/whatsapp/media/:messageId', async (req, res) => {
     if (!waConnected || !waSocket) {
-        return res.json({ success: false, error: 'WhatsApp non connecté', status: waStatus });
+        return res.status(503).json({ success: false, error: 'WhatsApp non connecté', status: waStatus });
     }
     if (!downloadMediaMessageFn) {
-        return res.json({ success: false, error: 'Téléchargement média non prêt' });
+        return res.status(503).json({ success: false, error: 'Téléchargement média non prêt' });
     }
     try {
-        const requestedId = decodeURIComponent(req.params.messageId || '');
-        // Les JID @g.us / @s.whatsapp.net / @lid ne sont pas des IDs média.
-        if (!requestedId || requestedId.includes('@')) {
-            return res.json({ success: false, error: 'ID média invalide: ouvrir un vrai message média, pas un contact/groupe', id: requestedId });
-        }
-        const msg = mediaMessages.get(requestedId);
-        if (!msg) return res.json({ success: false, error: 'Média non trouvé ou trop ancien', id: requestedId });
+        const msg = mediaMessages.get(req.params.messageId);
+        if (!msg) return res.status(404).json({ success: false, error: 'Média non trouvé ou trop ancien' });
         const meta = extractTextAndMedia(msg);
         const buffer = await withTimeout(
             downloadMediaMessageFn(msg, 'buffer', {}, { reuploadRequest: waSocket.updateMediaMessage }),
@@ -682,7 +635,7 @@ app.get('/api/whatsapp/media/:messageId', async (req, res) => {
         const mimetype = meta.mimetype || 'application/octet-stream';
         res.json({
             success: true,
-            messageId: requestedId,
+            messageId: req.params.messageId,
             mimetype,
             mime: mimetype,
             data: Buffer.from(buffer).toString('base64'),
@@ -699,7 +652,7 @@ app.get('/api/whatsapp/media/:messageId', async (req, res) => {
 // ── Photo de profil / groupe ────────────────────────────────────────────────
 app.get('/api/whatsapp/profile-picture/:jid', async (req, res) => {
     if (!waConnected || !waSocket) {
-        return res.json({ success: false, error: 'WhatsApp non connecté', status: waStatus, url: '' });
+        return res.status(503).json({ success: false, error: 'WhatsApp non connecté', status: waStatus });
     }
     try {
         const jid = decodeURIComponent(req.params.jid);
@@ -713,9 +666,8 @@ app.get('/api/whatsapp/profile-picture/:jid', async (req, res) => {
 
 // ── Récupérer uniquement les groupes ─────────────────────────────────────────
 app.get('/api/whatsapp/groups', async (_req, res) => {
-    if (!waInitialized) initWhatsApp().catch(() => {});
     if (!waConnected || !waSocket) {
-        return res.json({ success: false, error: 'WhatsApp non connecté', status: waStatus, groups: [], total: 0, needQr: waStatus !== 'open' });
+        return res.status(503).json({ error: 'WhatsApp non connecté', status: waStatus });
     }
     try {
         const rawGroups = await withTimeout(
@@ -733,7 +685,7 @@ app.get('/api/whatsapp/groups', async (_req, res) => {
             subject:      g.subject ?? id,
             isGroup:      true,
             picture:      await getProfilePicture(id),
-            profilePicUrl: '',
+            profilePicUrl: await getProfilePicture(id),
             participants: g.participants?.map(p => ({
                 id:     p.id,
                 admin:  p.admin ?? null,
@@ -745,8 +697,7 @@ app.get('/api/whatsapp/groups', async (_req, res) => {
         })));
 
         console.log(`👥 ${groups.length} groupes récupérés`);
-        groups.forEach(g => { if (!g.profilePicUrl) g.profilePicUrl = g.picture || ''; });
-        res.json({ success: true, connected: waConnected, status: waStatus, groups, total: groups.length });
+        res.json({ success: true, groups, total: groups.length });
     } catch (err) {
         console.error('❌ Erreur récupération groupes:', err.message);
         res.status(500).json({ error: err.message });
@@ -754,37 +705,17 @@ app.get('/api/whatsapp/groups', async (_req, res) => {
 });
 
 // ── Récupérer les contacts ────────────────────────────────────────────────────
-app.get('/api/whatsapp/contacts', async (_req, res) => {
-    if (!waInitialized) initWhatsApp().catch(() => {});
+app.get('/api/whatsapp/contacts', (_req, res) => {
+    if (!waConnected || !waSocket) {
+        return res.status(503).json({ error: 'WhatsApp non connecté', status: waStatus });
+    }
     try {
-        const map = new Map();
-        Object.values(cachedContacts || {}).forEach(c => {
-            if (!c?.id || String(c.id).endsWith('@g.us')) return;
-            const id = c.id;
-            const name = safeName(c.name) || safeName(c.notify) || safeName(c.pushName) || id.replace('@s.whatsapp.net','').replace('@lid','');
-            map.set(id, { id, jid:id, name, notify:c.notify || '', pushName:c.pushName || '', isGroup:false });
-        });
-        (cachedChats || []).forEach(c => {
-            if (!c?.id || String(c.id).endsWith('@g.us')) return;
-            const id = c.id;
-            const name = safeName(c.name) || id.replace('@s.whatsapp.net','').replace('@lid','');
-            if (!map.has(id)) map.set(id, { id, jid:id, name, isGroup:false, lastMessage:c.lastMessage || '', timestamp:c.timestamp || 0 });
-        });
-        (cachedMessages || []).forEach(m => {
-            const id = m.chatId || m.from;
-            if (!id || String(id).endsWith('@g.us')) return;
-            const name = safeName(m.pushName) || safeName(m.name) || id.replace('@s.whatsapp.net','').replace('@lid','');
-            if (!map.has(id)) map.set(id, { id, jid:id, name, isGroup:false, lastMessage:m.body || '', timestamp:m.timestamp || 0 });
-        });
-        const contacts = await Promise.all(Array.from(map.values()).map(async c => {
-            const picture = await getProfilePicture(c.id);
-            return { ...c, picture, profilePicUrl: picture };
-        }));
-        contacts.sort((a,b) => String(a.name).localeCompare(String(b.name)));
-        res.json({ success:true, connected:waConnected, status:waStatus, contacts, total:contacts.length, needQr:waStatus !== 'open' });
+        const contacts = Object.values(cachedContacts).filter(c => !c.id.endsWith('@g.us'));
+        console.log(`👤 ${contacts.length} contacts retournés`);
+        res.json({ success: true, contacts, total: contacts.length });
     } catch (err) {
         console.error('❌ Erreur récupération contacts:', err.message);
-        res.status(500).json({ success:false, error: err.message, contacts: [] });
+        res.status(500).json({ error: err.message });
     }
 });
 
