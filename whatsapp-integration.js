@@ -1,130 +1,338 @@
 /**
- * KAMOA SCADA - WhatsApp Frontend Integration
- * Compatible server.js whatsapp-web.js (Northflank)
+ * KAMOA SCADA — WhatsApp Frontend Integration  v3.0
+ *
+ * Utilise WebSocket natif (/ws) pour les notifications temps réel.
+ * Fallback REST polling si le WebSocket n'est pas disponible.
+ *
+ * Événements émis :
+ *   'status'          — { status: 'open'|'connecting'|'disconnected', phone? }
+ *   'qr'              — { qr: 'data:image/png;base64,...' }
+ *   'message'         — { messageId, from, fromMe, body, timestamp, pushName, isGroup }
+ *   'message_status'  — { messageId, to, status }
+ *   'chats_update'    — { count }
+ *   'contacts_update' — { count }
+ *   'error'           — { message }
  */
 
 class WhatsAppIntegration {
     constructor(config = {}) {
-        this.baseUrl = config.baseUrl || window.location.origin;
-        this.status = 'disconnected';
-        this.qr = null;
+        this.baseUrl   = config.baseUrl || window.location.origin;
+        this.wsUrl     = config.wsUrl   || this._buildWsUrl();
+        this.status    = 'disconnected';
+        this.phone     = null;
+        this.qr        = null;
         this.listeners = {};
-        this.polling = null;
+
+        // Internals
+        this._ws          = null;
+        this._wsReady     = false;
+        this._reconnectMs = 3_000;
+        this._reconnectTimer = null;
+        this._pollTimer   = null;
+        this._useFallback = false;
     }
 
-    // ─────────────────────────────
+    // ── URL WebSocket ─────────────────────────────────────────────────────────
+    _buildWsUrl() {
+        const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        return `${proto}//${window.location.host}/ws`;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // INIT
-    // ─────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
     async init() {
-        console.log("🔄 WhatsApp init...");
-
-        this.startPolling();
-
-        this.emit("init", {
-            status: "starting"
-        });
-
+        console.log('🔄 WhatsApp init (Baileys/WebSocket)...');
+        this._connectWs();
         return true;
     }
 
-    // ─────────────────────────────
-    // POLLING SERVER
-    // ─────────────────────────────
-    startPolling() {
-        if (this.polling) clearInterval(this.polling);
+    // ─────────────────────────────────────────────────────────────────────────
+    // WEBSOCKET
+    // ─────────────────────────────────────────────────────────────────────────
+    _connectWs() {
+        if (this._ws && this._ws.readyState <= 1) return; // already connecting/open
 
-        this.polling = setInterval(async () => {
-            await this.fetchStatus();
-            await this.fetchQR();
-        }, 3000);
-    }
-
-    // ─────────────────────────────
-    // STATUS
-    // ─────────────────────────────
-    async fetchStatus() {
         try {
-            const res = await fetch(`${this.baseUrl}/api/whatsapp/status`);
-            const data = await res.json();
+            this._ws = new WebSocket(this.wsUrl);
 
-            if (data?.whatsapp) {
-                this.status = data.whatsapp;
-                this.emit("status", this.status);
-            }
+            this._ws.onopen = () => {
+                console.log('🔌 WS connecté');
+                this._wsReady    = true;
+                this._useFallback = false;
+                this._reconnectMs = 3_000;
+                if (this._pollTimer) { clearInterval(this._pollTimer); this._pollTimer = null; }
+            };
 
-        } catch (err) {
-            console.error("Status error:", err);
+            this._ws.onmessage = (event) => {
+                try {
+                    const msg = JSON.parse(event.data);
+                    this._handleServerMessage(msg);
+                } catch (e) {
+                    console.warn('WS parse error:', e);
+                }
+            };
+
+            this._ws.onerror = () => {
+                console.warn('⚠️ WS erreur — bascule sur polling REST');
+                this._wsReady    = false;
+                this._useFallback = true;
+                this._startFallbackPolling();
+            };
+
+            this._ws.onclose = () => {
+                console.log('🔌 WS fermé — reconnexion dans', this._reconnectMs, 'ms');
+                this._wsReady = false;
+                if (this._reconnectTimer) clearTimeout(this._reconnectTimer);
+                this._reconnectTimer = setTimeout(() => {
+                    this._reconnectMs = Math.min(this._reconnectMs * 1.5, 30_000);
+                    this._connectWs();
+                }, this._reconnectMs);
+            };
+
+        } catch (e) {
+            console.warn('WS non disponible — polling REST activé');
+            this._useFallback = true;
+            this._startFallbackPolling();
         }
     }
 
-    // ─────────────────────────────
-    // QR CODE
-    // ─────────────────────────────
-    async fetchQR() {
-        try {
-            const res = await fetch(`${this.baseUrl}/api/whatsapp/qrcode`);
-            const data = await res.json();
+    // ─────────────────────────────────────────────────────────────────────────
+    // GESTION DES MESSAGES SERVEUR
+    // ─────────────────────────────────────────────────────────────────────────
+    _handleServerMessage(msg) {
+        switch (msg.type) {
+            case 'status':
+                this.status = msg.status;
+                this.phone  = msg.phone || null;
+                this.emit('status', { status: msg.status, phone: msg.phone });
+                break;
 
-            if (data?.qr) {
-                this.qr = data.qr;
-                this.emit("qr", this.qr);
-            }
+            case 'qr':
+                this.qr = msg.qr;
+                this.emit('qr', { qr: msg.qr });
+                break;
 
-        } catch (err) {
-            // ignore
+            case 'message':
+                this.emit('message', msg.data);
+                break;
+
+            case 'message_status':
+                this.emit('message_status', msg.data);
+                break;
+
+            case 'chats_update':
+                this.emit('chats_update', { count: msg.count });
+                break;
+
+            case 'contacts_update':
+                this.emit('contacts_update', { count: msg.count });
+                break;
+
+            default:
+                // Événements inconnus ignorés silencieusement
+                break;
         }
     }
 
-    // ─────────────────────────────
-    // SEND MESSAGE
-    // ─────────────────────────────
-    async sendMessage(number, message) {
+    // ─────────────────────────────────────────────────────────────────────────
+    // FALLBACK POLLING REST (si WebSocket indisponible)
+    // ─────────────────────────────────────────────────────────────────────────
+    _startFallbackPolling() {
+        if (this._pollTimer) return;
+        this._pollTimer = setInterval(async () => {
+            await this._pollStatus();
+            if (this.status !== 'open') await this._pollQR();
+        }, 3_000);
+    }
+
+    async _pollStatus() {
+        try {
+            const res  = await fetch(`${this.baseUrl}/api/whatsapp/status`);
+            const data = await res.json();
+            if (data?.status && data.status !== this.status) {
+                this.status = data.status;
+                this.phone  = data.phone || null;
+                this.emit('status', { status: data.status, phone: data.phone });
+            }
+        } catch (e) { /* ignore */ }
+    }
+
+    async _pollQR() {
+        try {
+            const res  = await fetch(`${this.baseUrl}/api/whatsapp/qrcode`);
+            const data = await res.json();
+            if (data?.qrCode && data.qrCode !== this.qr) {
+                this.qr = data.qrCode;
+                this.emit('qr', { qr: data.qrCode });
+            }
+        } catch (e) { /* ignore */ }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // API — ENVOYER UN MESSAGE TEXTE
+    // ─────────────────────────────────────────────────────────────────────────
+    async sendMessage(to, message) {
         try {
             const res = await fetch(`${this.baseUrl}/api/whatsapp/send`, {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify({
-                    to: number,
-                    message
-                })
+                method:  'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body:    JSON.stringify({ to, message }),
             });
-
-            return await res.json();
-
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+            return data; // { success, messageId, status }
         } catch (err) {
-            console.error("Send error:", err);
-            return { error: err.message };
+            console.error('❌ sendMessage error:', err.message);
+            this.emit('error', { message: err.message });
+            return { success: false, error: err.message };
         }
     }
 
-    // ─────────────────────────────
-    // EVENT SYSTEM
-    // ─────────────────────────────
-    on(event, callback) {
-        if (!this.listeners[event]) {
-            this.listeners[event] = [];
+    // ─────────────────────────────────────────────────────────────────────────
+    // API — ENVOYER UN MESSAGE À UN GROUPE
+    // ─────────────────────────────────────────────────────────────────────────
+    async sendGroupMessage(groupId, message) {
+        try {
+            const res = await fetch(`${this.baseUrl}/api/whatsapp/send-group`, {
+                method:  'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body:    JSON.stringify({ groupId, message }),
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+            return data;
+        } catch (err) {
+            console.error('❌ sendGroupMessage error:', err.message);
+            this.emit('error', { message: err.message });
+            return { success: false, error: err.message };
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // API — ENVOYER UN MÉDIA
+    // ─────────────────────────────────────────────────────────────────────────
+    async sendMedia(to, mediaUrl, options = {}) {
+        try {
+            const res = await fetch(`${this.baseUrl}/api/whatsapp/send-media`, {
+                method:  'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body:    JSON.stringify({
+                    to,
+                    mediaUrl,
+                    mediaType: options.mediaType || 'image',
+                    caption:   options.caption   || '',
+                    filename:  options.filename  || '',
+                }),
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+            return data;
+        } catch (err) {
+            console.error('❌ sendMedia error:', err.message);
+            this.emit('error', { message: err.message });
+            return { success: false, error: err.message };
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // API — RÉCUPÉRER LES CHATS
+    // ─────────────────────────────────────────────────────────────────────────
+    async getChats() {
+        try {
+            const res  = await fetch(`${this.baseUrl}/api/whatsapp/chats`);
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+            return data; // { success, chats, total }
+        } catch (err) {
+            console.error('❌ getChats error:', err.message);
+            return { success: false, chats: [], error: err.message };
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // API — RÉCUPÉRER LES GROUPES
+    // ─────────────────────────────────────────────────────────────────────────
+    async getGroups() {
+        try {
+            const res  = await fetch(`${this.baseUrl}/api/whatsapp/groups`);
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+            return data; // { success, groups, total }
+        } catch (err) {
+            console.error('❌ getGroups error:', err.message);
+            return { success: false, groups: [], error: err.message };
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // API — RÉCUPÉRER LES CONTACTS
+    // ─────────────────────────────────────────────────────────────────────────
+    async getContacts() {
+        try {
+            const res  = await fetch(`${this.baseUrl}/api/whatsapp/contacts`);
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+            return data; // { success, contacts, total }
+        } catch (err) {
+            console.error('❌ getContacts error:', err.message);
+            return { success: false, contacts: [], error: err.message };
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // API — DÉCONNECTER / RÉINITIALISER
+    // ─────────────────────────────────────────────────────────────────────────
+    async logout() {
+        try {
+            const res  = await fetch(`${this.baseUrl}/api/whatsapp/logout`, { method: 'POST' });
+            const data = await res.json();
+            return data;
+        } catch (err) {
+            return { success: false, error: err.message };
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // SYSTÈME D'ÉVÉNEMENTS
+    // ─────────────────────────────────────────────────────────────────────────
+    on(event, callback) {
+        if (!this.listeners[event]) this.listeners[event] = [];
         this.listeners[event].push(callback);
+        return this; // chainable
+    }
+
+    off(event, callback) {
+        if (!this.listeners[event]) return this;
+        this.listeners[event] = this.listeners[event].filter(cb => cb !== callback);
+        return this;
     }
 
     emit(event, data) {
-        if (this.listeners[event]) {
-            this.listeners[event].forEach(cb => cb(data));
-        }
+        (this.listeners[event] || []).forEach(cb => {
+            try { cb(data); } catch (e) { console.error(`Listener error [${event}]:`, e); }
+        });
     }
 
-    // ─────────────────────────────
-    // STOP
-    // ─────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
+    // ARRÊT PROPRE
+    // ─────────────────────────────────────────────────────────────────────────
     stop() {
-        if (this.polling) clearInterval(this.polling);
-        this.polling = null;
+        if (this._reconnectTimer) clearTimeout(this._reconnectTimer);
+        if (this._pollTimer)      clearInterval(this._pollTimer);
+        if (this._ws)             this._ws.close();
+        this._ws      = null;
+        this._wsReady = false;
+        console.log('🛑 WhatsAppIntegration arrêtée');
     }
 }
 
-// ─────────────────────────────
-// EXPORT GLOBAL
-// ─────────────────────────────
-window.WhatsAppIntegration = WhatsAppIntegration;
+// ── Export global (browser) ───────────────────────────────────────────────────
+if (typeof window !== 'undefined') {
+    window.WhatsAppIntegration = WhatsAppIntegration;
+}
+
+// ── Export CommonJS (Node.js / tests) ────────────────────────────────────────
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = WhatsAppIntegration;
+}
