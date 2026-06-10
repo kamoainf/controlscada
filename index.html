@@ -4412,7 +4412,112 @@
             w.document.write(`<html><head><title>KAMOA 1 Report</title>
             <style>body{font-family:monospace;font-size:11px;line-height:1.6;margin:20px;white-space:pre-wrap;color:#000}
             h1{font-size:14px;border-bottom:2px solid #000;padding-bottom:4px;margin-bottom:12px}</style></head>
-            <body><h1>KAMOA 1 — Supervision Report</h1><pre>${el.textContent}</pre></body></html>`);
+            <body><h1>KAMOA 1 — Supervision Report</h1><pre>${el.textContent}</pre>
+
+<script>
+/* ===== KAMOA WhatsApp Patch v3 — Contacts, Groupes, Photos ===== */
+(function(){
+  function apiBase(){ return (typeof RAILWAY_API !== 'undefined' ? RAILWAY_API : (window.location.origin + '/api')); }
+  function jidToNum(id){ return String(id||'').replace('@s.whatsapp.net','').replace('@g.us','').replace('@lid',''); }
+  function upsert(raw){
+    if (typeof waDB_loadChats !== 'function' || typeof waDB_saveChats !== 'function') return 0;
+    var saved = waDB_loadChats();
+    var before = saved.length;
+    var arr = Array.isArray(raw) ? raw : [];
+    arr.forEach(function(x){
+      var id = x.id || x.jid || x.chatId || x.from || x.umId || x.phone;
+      if (!id) return;
+      var isGroup = !!x.isGroup || String(id).indexOf('@g.us') !== -1;
+      var num = isGroup ? id : jidToNum(id);
+      var name = x.name || x.subject || x.pushName || x.notify || x.chatName || num || id;
+      var pic = x.picture || x.profilePicUrl || x.avatar || x.photo || '';
+      var found = saved.find(function(c){ return c.umId === id || c.phone === num || c.phone === id || c.id === id; });
+      if (!found) {
+        saved.push({ id:'wa_'+Date.now()+'_'+Math.random().toString(36).slice(2,8), umId:id, phone:num, emoji:isGroup?'👥':'👤', name:name, desc:isGroup?'Groupe WhatsApp':num, isGroup:isGroup, picture:pic, profilePicUrl:pic });
+      } else {
+        found.umId = id; found.phone = found.phone || num; found.isGroup = isGroup; found.emoji = isGroup?'👥':'👤';
+        if (name && (isGroup || !found.name || found.name === found.phone || String(found.name).indexOf('@') !== -1)) found.name = name;
+        if (pic) { found.picture = pic; found.profilePicUrl = pic; }
+      }
+    });
+    waDB_saveChats(saved);
+    return saved.length - before;
+  }
+
+  window.waLoadFromUltraMsg = async function(){
+    var icons=[document.getElementById('waLoadIcon'),document.getElementById('waLoadIcon2')];
+    icons.forEach(function(i){ if(i) i.style.animation='spin 1s linear infinite'; });
+    try{
+      var base = apiBase();
+      var results = await Promise.allSettled([
+        fetch(base+'/whatsapp/chats').then(function(r){return r.json();}),
+        fetch(base+'/whatsapp/groups').then(function(r){return r.json();}),
+        fetch(base+'/whatsapp/contacts').then(function(r){return r.json();})
+      ]);
+      icons.forEach(function(i){ if(i) i.style.animation=''; });
+      var all=[], g=0, c=0;
+      results.forEach(function(x){
+        if(x.status !== 'fulfilled' || !x.value) return;
+        var v=x.value;
+        if (Array.isArray(v.chats)) { all = all.concat(v.chats); g += v.chats.filter(function(z){return z.isGroup;}).length; c += v.chats.filter(function(z){return !z.isGroup;}).length; }
+        if (Array.isArray(v.groups)) { all = all.concat(v.groups); g += v.groups.length; }
+        if (Array.isArray(v.contacts)) { all = all.concat(v.contacts); c += v.contacts.length; }
+      });
+      var added = upsert(all);
+      if (typeof wawBuildAllChats === 'function') wawBuildAllChats();
+      if (typeof wawRenderChatList === 'function') wawRenderChatList();
+      if (typeof wawUpdateTotalBadge === 'function') wawUpdateTotalBadge();
+      if (!all.length) toast('⚠️ Aucun contact/groupe. Vérifie QR: WhatsApp doit être connecté/open.','var(--amber)');
+      else toast('✅ Synchro: '+g+' groupes · '+c+' contacts (+'+added+')','#25D366');
+    }catch(e){
+      icons.forEach(function(i){ if(i) i.style.animation=''; });
+      toast('⚠️ Synchro impossible: '+e.message,'var(--amber)');
+    }
+  };
+
+  window.wawSendPhotoFromFile = function(input){
+    var file = input && input.files && input.files[0];
+    if(!file || !wawActiveChatId) return;
+    if(!file.type.startsWith('image/') && !file.type.startsWith('video/') && file.type !== 'application/pdf') { toast('⚠️ Fichier non supporté','var(--amber)'); input.value=''; return; }
+    var reader = new FileReader();
+    reader.onload = function(){
+      var dataUrl = reader.result;
+      var mediaType = file.type.startsWith('video/') ? 'video' : (file.type === 'application/pdf' ? 'document' : 'image');
+      var caption = (document.getElementById('wawInp') && document.getElementById('wawInp').value.trim()) || '';
+      var toJid = String(wawActiveChatId).indexOf('@') !== -1 ? wawActiveChatId : String(wawActiveChatId).replace(/\D/g,'')+'@s.whatsapp.net';
+      var localId = 'local_media_'+Date.now();
+      if (typeof waDB_mergeMsgs === 'function') {
+        waDB_mergeMsgs(wawActiveChatId,[{id:localId, from:waMyPhone, body:caption || '[photo]', fromMe:true, ts:Math.floor(Date.now()/1000), time:new Date().toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'}), date:new Date().toLocaleDateString('fr-FR'), delivered:false, read:true, hasMedia:true, mediaType:mediaType, mediaMime:file.type, mediaData:String(dataUrl).split(',')[1], caption:caption, fileName:file.name}]);
+        if (typeof wawRenderMsgsFromDB === 'function') wawRenderMsgsFromDB();
+      }
+      fetch(apiBase()+'/whatsapp/send-media-base64',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({to:toJid,dataUrl:dataUrl,mimetype:file.type,mediaType:mediaType,caption:caption,filename:file.name})})
+        .then(function(r){return r.json();})
+        .then(function(d){
+          if(d.success){ toast('✅ Photo envoyée','#25D366'); if(document.getElementById('wawInp')) document.getElementById('wawInp').value=''; }
+          else toast('⚠️ Envoi photo: '+(d.error||'erreur'),'var(--amber)');
+        })
+        .catch(function(e){ toast('⚠️ Erreur photo: '+e.message,'var(--amber)'); })
+        .finally(function(){ input.value=''; });
+    };
+    reader.readAsDataURL(file);
+  };
+
+  function injectPhotoButton(){
+    if(document.getElementById('wawPhotoIn')) return;
+    var send = document.getElementById('wawSendBtn');
+    if(!send || !send.parentNode) return;
+    var label = document.createElement('label');
+    label.className = 'waw-send-btn';
+    label.title = 'Envoyer photo / fichier';
+    label.style.cssText = 'display:flex;align-items:center;justify-content:center;cursor:pointer;background:rgba(37,211,102,.14);border:1px solid rgba(37,211,102,.35);border-radius:10px;color:#25D366;width:38px;height:38px;margin-right:6px';
+    label.innerHTML = '<i class="fas fa-image"></i><input id="wawPhotoIn" type="file" accept="image/*,video/*,application/pdf" style="display:none" onchange="wawSendPhotoFromFile(this)">';
+    send.parentNode.insertBefore(label, send);
+  }
+  if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', injectPhotoButton); else setTimeout(injectPhotoButton, 500);
+})();
+</script>
+
+</body></html>`);
             w.document.close();
             setTimeout(() => { w.print(); }, 400);
         }
@@ -6106,6 +6211,11 @@
             }
         }
 
+        function wawIsRealMediaId(id) {
+            id = String(id || '');
+            return !!id && id.indexOf('@') === -1 && id.length >= 8;
+        }
+
         function wawRenderMediaContent(m) {
             // If we have base64 media data
             if (m.mediaData) {
@@ -6139,7 +6249,15 @@
             else if (mt === 'document') { icon = '📄'; label = 'Document'; }
             else if (mt === 'sticker') { icon = '😊'; label = 'Sticker'; }
             var caption = m.caption ? '<div style="font-size:11px;color:#e9edef;margin-top:4px">'+m.caption.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</div>' : '';
-            return '<div class="waw-media-placeholder" onclick="wawRequestMedia(\''+m.id+'\',this)" '
+            var mediaId = m.messageId || m.id || '';
+            if (!wawIsRealMediaId(mediaId)) {
+                return '<div class="waw-media-placeholder" style="display:flex;align-items:center;gap:8px;background:rgba(255,255,255,.05);border:1px dashed rgba(255,255,255,.12);border-radius:10px;padding:10px 14px;min-width:180px">'
+                    +'<div style="font-size:26px">'+icon+'</div>'
+                    +'<div><div style="font-size:11px;color:#e9edef;font-weight:600">'+label+'</div>'
+                    +'<div style="font-size:9px;color:#e8a05c;font-family:var(--mono)">Média non téléchargeable: ID message absent</div></div>'
+                    +'</div>'+caption;
+            }
+            return '<div class="waw-media-placeholder" onclick="wawRequestMedia(\''+mediaId+'\',this)" '
                 +'style="display:flex;align-items:center;gap:8px;background:rgba(255,255,255,.07);border:1px dashed rgba(255,255,255,.15);border-radius:10px;padding:10px 14px;cursor:pointer;min-width:180px;transition:all .2s" '
                 +'onmouseover="this.style.background=\'rgba(37,211,102,.08)\';this.style.borderColor=\'rgba(37,211,102,.3)\'" '
                 +'onmouseout="this.style.background=\'rgba(255,255,255,.07)\';this.style.borderColor=\'rgba(255,255,255,.15)\'">'
@@ -6152,6 +6270,10 @@
 
         function wawRequestMedia(msgId, el) {
             if (!el) return;
+            if (!wawIsRealMediaId(msgId)) {
+                el.innerHTML = '<div style="font-size:10px;color:#e8a05c">ID média invalide</div>';
+                return;
+            }
             el.innerHTML = '<div style="font-size:11px;color:#25D366;font-family:var(--mono)">⏳ Chargement…</div>';
             fetch(RAILWAY_API+'/whatsapp/media/'+encodeURIComponent(msgId))
                 .then(function(r){return r.json();})
@@ -6430,7 +6552,8 @@
                         var d2 = ts ? new Date(ts*1000) : new Date();
                         var entry = { id:m.id||(''+(ts||Date.now())+cid), from:name, body:m.body||'', fromMe:!!m.fromMe,
                             ts:ts, time:d2.toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'}),
-                            date:d2.toLocaleDateString('fr-FR'), read:(cid===wawActiveChatId), delivered:true };
+                            date:d2.toLocaleDateString('fr-FR'), read:(cid===wawActiveChatId), delivered:true,
+                            messageId:m.messageId||m.id||'', hasMedia:!!m.hasMedia, mediaType:m.mediaType||m.type||null, mediaMime:m.mimetype||m.mime||null, caption:m.caption||null, fileName:m.fileName||null };
                         totalAdded += waDB_mergeMsgs(cid, [entry]);
                     });
                 } else {
@@ -6446,7 +6569,8 @@
                         var d2 = ts ? new Date(ts*1000) : new Date();
                         var entry = { id:m.id||(''+(ts||Date.now())+cid), from:name, body:m.body||m.message||'',
                             fromMe:!!m.fromMe, ts:ts, time:d2.toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'}),
-                            date:d2.toLocaleDateString('fr-FR'), read:(cid===wawActiveChatId), delivered:true };
+                            date:d2.toLocaleDateString('fr-FR'), read:(cid===wawActiveChatId), delivered:true,
+                            messageId:m.messageId||m.id||'', hasMedia:!!m.hasMedia, mediaType:m.mediaType||m.type||null, mediaMime:m.mimetype||m.mime||null, caption:m.caption||null, fileName:m.fileName||null };
                         totalAdded += waDB_mergeMsgs(cid, [entry]);
                     });
                 }
@@ -8107,6 +8231,111 @@ window.addEventListener('load',()=>{
             </div>
         </div>
     </div>
+
+
+
+<script>
+/* ===== KAMOA WhatsApp Patch v3 — Contacts, Groupes, Photos ===== */
+(function(){
+  function apiBase(){ return (typeof RAILWAY_API !== 'undefined' ? RAILWAY_API : (window.location.origin + '/api')); }
+  function jidToNum(id){ return String(id||'').replace('@s.whatsapp.net','').replace('@g.us','').replace('@lid',''); }
+  function upsert(raw){
+    if (typeof waDB_loadChats !== 'function' || typeof waDB_saveChats !== 'function') return 0;
+    var saved = waDB_loadChats();
+    var before = saved.length;
+    var arr = Array.isArray(raw) ? raw : [];
+    arr.forEach(function(x){
+      var id = x.id || x.jid || x.chatId || x.from || x.umId || x.phone;
+      if (!id) return;
+      var isGroup = !!x.isGroup || String(id).indexOf('@g.us') !== -1;
+      var num = isGroup ? id : jidToNum(id);
+      var name = x.name || x.subject || x.pushName || x.notify || x.chatName || num || id;
+      var pic = x.picture || x.profilePicUrl || x.avatar || x.photo || '';
+      var found = saved.find(function(c){ return c.umId === id || c.phone === num || c.phone === id || c.id === id; });
+      if (!found) {
+        saved.push({ id:'wa_'+Date.now()+'_'+Math.random().toString(36).slice(2,8), umId:id, phone:num, emoji:isGroup?'👥':'👤', name:name, desc:isGroup?'Groupe WhatsApp':num, isGroup:isGroup, picture:pic, profilePicUrl:pic });
+      } else {
+        found.umId = id; found.phone = found.phone || num; found.isGroup = isGroup; found.emoji = isGroup?'👥':'👤';
+        if (name && (isGroup || !found.name || found.name === found.phone || String(found.name).indexOf('@') !== -1)) found.name = name;
+        if (pic) { found.picture = pic; found.profilePicUrl = pic; }
+      }
+    });
+    waDB_saveChats(saved);
+    return saved.length - before;
+  }
+
+  window.waLoadFromUltraMsg = async function(){
+    var icons=[document.getElementById('waLoadIcon'),document.getElementById('waLoadIcon2')];
+    icons.forEach(function(i){ if(i) i.style.animation='spin 1s linear infinite'; });
+    try{
+      var base = apiBase();
+      var results = await Promise.allSettled([
+        fetch(base+'/whatsapp/chats').then(function(r){return r.json();}),
+        fetch(base+'/whatsapp/groups').then(function(r){return r.json();}),
+        fetch(base+'/whatsapp/contacts').then(function(r){return r.json();})
+      ]);
+      icons.forEach(function(i){ if(i) i.style.animation=''; });
+      var all=[], g=0, c=0;
+      results.forEach(function(x){
+        if(x.status !== 'fulfilled' || !x.value) return;
+        var v=x.value;
+        if (Array.isArray(v.chats)) { all = all.concat(v.chats); g += v.chats.filter(function(z){return z.isGroup;}).length; c += v.chats.filter(function(z){return !z.isGroup;}).length; }
+        if (Array.isArray(v.groups)) { all = all.concat(v.groups); g += v.groups.length; }
+        if (Array.isArray(v.contacts)) { all = all.concat(v.contacts); c += v.contacts.length; }
+      });
+      var added = upsert(all);
+      if (typeof wawBuildAllChats === 'function') wawBuildAllChats();
+      if (typeof wawRenderChatList === 'function') wawRenderChatList();
+      if (typeof wawUpdateTotalBadge === 'function') wawUpdateTotalBadge();
+      if (!all.length) toast('⚠️ Aucun contact/groupe. Vérifie QR: WhatsApp doit être connecté/open.','var(--amber)');
+      else toast('✅ Synchro: '+g+' groupes · '+c+' contacts (+'+added+')','#25D366');
+    }catch(e){
+      icons.forEach(function(i){ if(i) i.style.animation=''; });
+      toast('⚠️ Synchro impossible: '+e.message,'var(--amber)');
+    }
+  };
+
+  window.wawSendPhotoFromFile = function(input){
+    var file = input && input.files && input.files[0];
+    if(!file || !wawActiveChatId) return;
+    if(!file.type.startsWith('image/') && !file.type.startsWith('video/') && file.type !== 'application/pdf') { toast('⚠️ Fichier non supporté','var(--amber)'); input.value=''; return; }
+    var reader = new FileReader();
+    reader.onload = function(){
+      var dataUrl = reader.result;
+      var mediaType = file.type.startsWith('video/') ? 'video' : (file.type === 'application/pdf' ? 'document' : 'image');
+      var caption = (document.getElementById('wawInp') && document.getElementById('wawInp').value.trim()) || '';
+      var toJid = String(wawActiveChatId).indexOf('@') !== -1 ? wawActiveChatId : String(wawActiveChatId).replace(/\D/g,'')+'@s.whatsapp.net';
+      var localId = 'local_media_'+Date.now();
+      if (typeof waDB_mergeMsgs === 'function') {
+        waDB_mergeMsgs(wawActiveChatId,[{id:localId, from:waMyPhone, body:caption || '[photo]', fromMe:true, ts:Math.floor(Date.now()/1000), time:new Date().toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'}), date:new Date().toLocaleDateString('fr-FR'), delivered:false, read:true, hasMedia:true, mediaType:mediaType, mediaMime:file.type, mediaData:String(dataUrl).split(',')[1], caption:caption, fileName:file.name}]);
+        if (typeof wawRenderMsgsFromDB === 'function') wawRenderMsgsFromDB();
+      }
+      fetch(apiBase()+'/whatsapp/send-media-base64',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({to:toJid,dataUrl:dataUrl,mimetype:file.type,mediaType:mediaType,caption:caption,filename:file.name})})
+        .then(function(r){return r.json();})
+        .then(function(d){
+          if(d.success){ toast('✅ Photo envoyée','#25D366'); if(document.getElementById('wawInp')) document.getElementById('wawInp').value=''; }
+          else toast('⚠️ Envoi photo: '+(d.error||'erreur'),'var(--amber)');
+        })
+        .catch(function(e){ toast('⚠️ Erreur photo: '+e.message,'var(--amber)'); })
+        .finally(function(){ input.value=''; });
+    };
+    reader.readAsDataURL(file);
+  };
+
+  function injectPhotoButton(){
+    if(document.getElementById('wawPhotoIn')) return;
+    var send = document.getElementById('wawSendBtn');
+    if(!send || !send.parentNode) return;
+    var label = document.createElement('label');
+    label.className = 'waw-send-btn';
+    label.title = 'Envoyer photo / fichier';
+    label.style.cssText = 'display:flex;align-items:center;justify-content:center;cursor:pointer;background:rgba(37,211,102,.14);border:1px solid rgba(37,211,102,.35);border-radius:10px;color:#25D366;width:38px;height:38px;margin-right:6px';
+    label.innerHTML = '<i class="fas fa-image"></i><input id="wawPhotoIn" type="file" accept="image/*,video/*,application/pdf" style="display:none" onchange="wawSendPhotoFromFile(this)">';
+    send.parentNode.insertBefore(label, send);
+  }
+  if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', injectPhotoButton); else setTimeout(injectPhotoButton, 500);
+})();
+</script>
 
 </body>
 </html>
