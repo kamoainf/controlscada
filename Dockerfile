@@ -1,24 +1,25 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# KAMOA SCADA — Dockerfile (UltraMsg, no Puppeteer / Chromium)
+# KAMOA SCADA v3 — Dockerfile
+# WhatsApp via Baileys (@whiskeysockets/baileys) — aucun navigateur requis
 # ─────────────────────────────────────────────────────────────────────────────
 FROM node:20-slim
 
 WORKDIR /app
 
-# ── Node dependencies only — no browser needed ───────────────────────────────
+# ── Dépendances système minimales (Baileys n'a pas besoin de Chrome) ──────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Installer les dépendances Node ───────────────────────────────────────────
 COPY package*.json ./
+RUN npm install --omit=dev --no-audit --no-fund
 
-# Remove whatsapp-web.js and puppeteer from the install if still in package.json
-# (safe to run even if they're already gone)
-RUN npm uninstall --save whatsapp-web.js puppeteer puppeteer-core 2>/dev/null || true
-
-RUN npm install --omit=dev
-
-# ── Application files ─────────────────────────────────────────────────────────
+# ── Copier les fichiers de l'application ─────────────────────────────────────
 COPY . .
 
-# ── Port ──────────────────────────────────────────────────────────────────────
-EXPOSE 3000
+# ── Port exposé ───────────────────────────────────────────────────────────────
+EXPOSE 8080
 
-# ── Start ─────────────────────────────────────────────────────────────────────
+# ── Démarrage ─────────────────────────────────────────────────────────────────
 CMD ["node", "server.js"]
