@@ -2407,6 +2407,16 @@
         .waw-msg-wrap.sent{justify-content:flex-end}
         .waw-msg-wrap.recv{justify-content:flex-start}
         .waw-bubble{max-width:65%;padding:7px 10px 6px;border-radius:8px;font-size:13px;line-height:1.5;font-family:var(--sans);position:relative;word-break:break-word}
+        .waw-msg-actions{display:none;gap:3px;position:absolute;top:-18px;right:4px;background:#111b21;border:1px solid #2a3942;border-radius:14px;padding:2px;box-shadow:0 6px 18px rgba(0,0,0,.35);z-index:2}
+        .waw-msg-wrap.recv .waw-msg-actions{right:auto;left:4px}
+        .waw-bubble:hover .waw-msg-actions{display:flex}
+        .waw-msg-act{width:22px;height:22px;border:0;border-radius:50%;background:transparent;color:#aebac1;cursor:pointer;font-size:10px;display:flex;align-items:center;justify-content:center}
+        .waw-msg-act:hover{background:#2a3942;color:#25D366}
+        .waw-reply-preview{display:none;align-items:center;gap:9px;margin:8px 12px 0;padding:8px 10px;border-left:3px solid #25D366;background:#182f38;border-radius:8px;color:#e9edef}
+        .waw-reply-preview.on{display:flex}
+        .waw-reply-body{flex:1;min-width:0}
+        .waw-reply-title{font-size:10px;color:#25D366;font-weight:700}
+        .waw-reply-text{font-size:11px;color:#aebac1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
         .waw-msg-wrap.sent .waw-bubble{background:#005c4b;border-bottom-right-radius:2px;color:#e9edef}
         .waw-msg-wrap.recv .waw-bubble{background:#202c33;border-bottom-left-radius:2px;color:#e9edef}
         .waw-bubble-author{font-size:11px;font-weight:600;color:#25D366;margin-bottom:3px}
@@ -2423,6 +2433,18 @@
         .waw-qb-btn:hover{border-color:#25D366;color:#25D366;background:rgba(37,211,102,.08)}
         /* Input bar */
         .waw-input-bar{display:flex;align-items:flex-end;gap:8px;padding:8px 12px;background:#202c33;flex-shrink:0}
+        .waw-compose-wrap{background:#202c33;border-top:1px solid #1a2530;flex-shrink:0}
+        .waw-compose-wrap .waw-input-bar{border-top:none}
+        .waw-attach-preview{display:none;align-items:center;gap:10px;margin:8px 12px 0;padding:10px 12px;background:#182f38;border:1px solid #2a3942;border-radius:10px}
+        .waw-attach-preview.on{display:flex}
+        .waw-attach-thumb{width:54px;height:54px;border-radius:8px;object-fit:cover;background:#2a3942;display:none;flex-shrink:0}
+        .waw-attach-ico{width:54px;height:54px;border-radius:8px;background:#2a3942;display:flex;align-items:center;justify-content:center;color:#aebac1;font-size:22px;flex-shrink:0}
+        .waw-attach-meta{flex:1;min-width:0}
+        .waw-attach-name{font-size:12px;font-weight:600;color:#e9edef;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        .waw-attach-size{font-size:10px;color:#8696a0;font-family:var(--mono);margin-top:2px}
+        .waw-attach-remove{width:30px;height:30px;border-radius:50%;border:none;background:transparent;color:#8696a0;cursor:pointer;font-size:16px}
+        .waw-attach-remove:hover{background:rgba(232,85,85,.12);color:#e85555}
+        .waw-drop-active{outline:2px dashed #25D366;outline-offset:-7px;background:rgba(37,211,102,.06)}
         .waw-icon-btn{width:40px;height:40px;background:none;border:none;color:#8696a0;font-size:20px;cursor:pointer;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:color .15s}
         .waw-icon-btn:hover{color:#e9edef}
         .waw-inp-wrap{flex:1;background:#2a3942;border-radius:10px;padding:8px 14px;min-height:40px;display:flex;align-items:center}
@@ -5555,6 +5577,8 @@
         var wawSearchQ        = '';
         var wawMsgSearchQ     = '';   // search within active conversation
         var wawAllChats       = [];
+        var wawAttachedFile   = null;
+        var wawReplyTo        = null;
 
         function waEscapeHtml(v){
             return String(v||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;');
@@ -5568,6 +5592,9 @@
             var url = obj && (obj.picture || obj.profilePicUrl || obj.avatar || obj.photo);
             if (url) return '<img src="'+waEscapeHtml(url)+'" alt="" referrerpolicy="no-referrer" onerror="this.style.display=\'none\';this.parentNode.textContent=\''+(fallbackEmoji||'💬')+'\';" style="width:100%;height:100%;border-radius:50%;object-fit:cover;display:block">';
             return fallbackEmoji || '💬';
+        }
+        function waJsArg(v){
+            return String(v || '').replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/\n/g,'\\n').replace(/\r/g,'');
         }
         function waUpsertChat(dbChats, raw){
             var cid = raw.id || raw.jid || raw.chatId || raw.from || raw.umId || raw.phone;
@@ -6199,6 +6226,79 @@
             a.href = src; a.download = fname; a.click();
         }
 
+        function wawStartReply(messageId){
+            var msgs = waDB_loadMsgs(wawActiveChatId);
+            var m = msgs.find(function(x){ return x.id === messageId; });
+            if (!m) return;
+            wawReplyTo = { id: messageId, from: m.from || '', body: m.body || (m.hasMedia ? '[media]' : '') };
+            document.getElementById('wawReplyTitle').textContent = 'Réponse à ' + (m.fromMe ? 'vous' : (m.from || wawActiveChatName));
+            document.getElementById('wawReplyText').textContent = wawReplyTo.body || '[media]';
+            document.getElementById('wawReplyPreview').classList.add('on');
+            document.getElementById('wawInp').focus();
+        }
+        function wawCancelReply(){
+            wawReplyTo = null;
+            var el = document.getElementById('wawReplyPreview');
+            if (el) el.classList.remove('on');
+        }
+        function wawEditMessage(messageId){
+            var msgs = waDB_loadMsgs(wawActiveChatId);
+            var m = msgs.find(function(x){ return x.id === messageId; });
+            if (!m || !m.fromMe) { toast('Seuls vos messages peuvent être modifiés','var(--amber)'); return; }
+            var next = prompt('Modifier le message', m.body || '');
+            if (next === null) return;
+            next = next.trim();
+            if (!next) return;
+            fetch(RAILWAY_API+'/whatsapp/edit-message',{
+                method:'POST',
+                headers:{'Content-Type':'application/json'},
+                body:JSON.stringify({chatId:wawActiveChatId, messageId:messageId, message:next})
+            }).then(function(r){return r.json();}).then(function(d){
+                if(!d.success){ toast('⚠️ Edition impossible: '+(d.error||''),'var(--amber)'); return; }
+                m.body = next; m.edited = true; waDB_saveMsgs(wawActiveChatId, msgs); wawRenderMsgsFromDB();
+            }).catch(function(e){ toast('⚠️ Edition impossible: '+e.message,'var(--amber)'); });
+        }
+        function wawDeleteMessage(messageId){
+            if (!confirm('Supprimer ce message ?')) return;
+            var msgs = waDB_loadMsgs(wawActiveChatId);
+            var m = msgs.find(function(x){ return x.id === messageId; }) || {};
+            fetch(RAILWAY_API+'/whatsapp/message/'+encodeURIComponent(messageId)+'?chatId='+encodeURIComponent(wawActiveChatId)+'&fromMe='+encodeURIComponent(!!m.fromMe),{
+                method:'DELETE'
+            }).then(function(r){return r.json();}).then(function(d){
+                if(!d.success){ toast('⚠️ Suppression impossible: '+(d.error||''),'var(--amber)'); return; }
+                msgs = msgs.filter(function(x){ return x.id !== messageId; });
+                waDB_saveMsgs(wawActiveChatId, msgs);
+                wawRenderMsgsFromDB(); wawBuildAllChats(); wawRenderChatList();
+            }).catch(function(e){ toast('⚠️ Suppression impossible: '+e.message,'var(--amber)'); });
+        }
+        function wawForwardMessage(messageId){
+            var dest = prompt('Transférer vers quel contact/groupe ?\nCollez le numéro ou le JID WhatsApp.');
+            if (!dest) return;
+            fetch(RAILWAY_API+'/whatsapp/forward-message',{
+                method:'POST',
+                headers:{'Content-Type':'application/json'},
+                body:JSON.stringify({to:dest.trim(), messageId:messageId})
+            }).then(function(r){return r.json();}).then(function(d){
+                if(d.success) toast('✅ Message transféré','#25D366');
+                else toast('⚠️ Transfert impossible: '+(d.error||''),'var(--amber)');
+            }).catch(function(e){ toast('⚠️ Transfert impossible: '+e.message,'var(--amber)'); });
+        }
+        function wawDeleteConversation(){
+            if (!wawActiveChatId) return;
+            if (!confirm('Supprimer cette conversation ?')) return;
+            fetch(RAILWAY_API+'/whatsapp/chat/'+encodeURIComponent(wawActiveChatId), { method:'DELETE' })
+                .then(function(r){return r.json();})
+                .then(function(d){
+                    if(!d.success){ toast('⚠️ Suppression impossible: '+(d.error||''),'var(--amber)'); return; }
+                    var chats = waDB_loadChats().filter(function(c){ return (c.umId||c.phone||c.id) !== wawActiveChatId; });
+                    waDB_saveChats(chats);
+                    waDB_saveMsgs(wawActiveChatId, []);
+                    wawCloseConv(); wawBuildAllChats(); wawRenderChatList(); wawUpdateTotalBadge();
+                    toast('Conversation supprimée','#25D366');
+                })
+                .catch(function(e){ toast('⚠️ Suppression impossible: '+e.message,'var(--amber)'); });
+        }
+
         function wawRenderMsgs(msgs){
             var c = document.getElementById('wawMsgs');
             if (!msgs || !msgs.length) {
@@ -6223,11 +6323,18 @@
                 if (date && date !== lastDate) { lastDate=date; sep='<div class="waw-date-sep"><span>'+date+'</span></div>'; }
                 var tick = isSent ? '<span class="waw-bubble-tick" style="color:'+(m.delivered?'#53bdeb':'#8696a0')+'">'+(m.delivered?'✓✓':'✓')+'</span>' : '';
                 var mediaHtml = isMediaMsg ? wawRenderMediaContent(m) : '';
+                var edited = m.edited ? '<span style="font-size:9px;color:rgba(233,237,239,.45);margin-right:4px">modifié</span>' : '';
+                var actions = '<div class="waw-msg-actions">'
+                    +'<button class="waw-msg-act" title="Répondre" onclick="event.stopPropagation();wawStartReply(\''+waJsArg(m.id)+'\')"><i class="fas fa-reply"></i></button>'
+                    +'<button class="waw-msg-act" title="Transférer" onclick="event.stopPropagation();wawForwardMessage(\''+waJsArg(m.id)+'\')"><i class="fas fa-share"></i></button>'
+                    +(isSent?'<button class="waw-msg-act" title="Modifier" onclick="event.stopPropagation();wawEditMessage(\''+waJsArg(m.id)+'\')"><i class="fas fa-pen"></i></button>':'')
+                    +'<button class="waw-msg-act" title="Supprimer" onclick="event.stopPropagation();wawDeleteMessage(\''+waJsArg(m.id)+'\')"><i class="fas fa-trash-alt"></i></button>'
+                    +'</div>';
                 var textHtml = body ? '<div class="waw-bubble-text">'+body+'</div>' : '';
                 return sep+'<div class="waw-msg-wrap '+(isSent?'sent':'recv')+'" data-mid="'+m.id+'">'
-                    +'<div class="waw-bubble">'+author+mediaHtml+textHtml
+                    +'<div class="waw-bubble">'+actions+author+mediaHtml+textHtml
                     +'<div class="waw-bubble-meta">'
-                    +'<span class="waw-bubble-time">'+ts+'</span>'+tick
+                    +edited+'<span class="waw-bubble-time">'+ts+'</span>'+tick
                     +'</div></div></div>';
             }).join('');
             c.innerHTML = html;
@@ -6279,53 +6386,195 @@
                 });
         }
 
+        function wawFmtSize(bytes){
+            if (!bytes) return '0 o';
+            if (bytes < 1024) return bytes + ' o';
+            if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' Ko';
+            return (bytes / 1048576).toFixed(1) + ' Mo';
+        }
+        function wawHandleFile(input){
+            var file = input.files && input.files[0];
+            if (file) wawAttachFile(file);
+            input.value = '';
+        }
+        function wawAttachFile(file){
+            if (!file) return;
+            var maxSize = 35 * 1024 * 1024;
+            if (file.size > maxSize) {
+                toast('Fichier trop lourd: maximum 35 Mo conseillé','var(--amber)');
+                return;
+            }
+            wawAttachedFile = file;
+            var prev = document.getElementById('wawAttachPreview');
+            var thumb = document.getElementById('wawAttachThumb');
+            var icon = document.getElementById('wawAttachIcon');
+            var name = document.getElementById('wawAttachName');
+            var size = document.getElementById('wawAttachSize');
+            if (name) name.textContent = file.name || 'media';
+            if (size) size.textContent = wawFmtSize(file.size) + ' · prêt à envoyer';
+            if ((file.type || '').indexOf('image/') === 0) {
+                var reader = new FileReader();
+                reader.onload = function(e){
+                    thumb.src = e.target.result;
+                    thumb.style.display = 'block';
+                    icon.style.display = 'none';
+                };
+                reader.readAsDataURL(file);
+            } else {
+                thumb.src = '';
+                thumb.style.display = 'none';
+                icon.style.display = 'flex';
+                var cls = 'fa-file';
+                if ((file.type || '').indexOf('video/') === 0) cls = 'fa-file-video';
+                else if ((file.type || '').indexOf('audio/') === 0) cls = 'fa-file-audio';
+                else if ((file.type || '').indexOf('pdf') !== -1) cls = 'fa-file-pdf';
+                else if ((file.name || '').match(/\.docx?$/i)) cls = 'fa-file-word';
+                else if ((file.name || '').match(/\.xlsx?$/i)) cls = 'fa-file-excel';
+                icon.innerHTML = '<i class="fas '+cls+'"></i>';
+            }
+            if (prev) prev.classList.add('on');
+            document.getElementById('wawInp').focus();
+        }
+        function wawRemoveAttach(){
+            wawAttachedFile = null;
+            var prev = document.getElementById('wawAttachPreview');
+            var thumb = document.getElementById('wawAttachThumb');
+            var icon = document.getElementById('wawAttachIcon');
+            if (prev) prev.classList.remove('on');
+            if (thumb) { thumb.src = ''; thumb.style.display = 'none'; }
+            if (icon) { icon.style.display = 'flex'; icon.innerHTML = '<i class="fas fa-file"></i>'; }
+        }
+        function wawFileToBase64(file){
+            return new Promise(function(resolve, reject){
+                var reader = new FileReader();
+                reader.onload = function(){ resolve(String(reader.result || '').split(',')[1] || ''); };
+                reader.onerror = function(){ reject(new Error('Lecture fichier échouée')); };
+                reader.readAsDataURL(file);
+            });
+        }
+        function wawSendMediaBase64(to, file, caption, quotedMessageId){
+            return wawFileToBase64(file).then(function(base64){
+                return fetch(RAILWAY_API+'/whatsapp/send-media-base64',{
+                    method:'POST',
+                    headers:{'Content-Type':'application/json'},
+                    body:JSON.stringify({
+                        to: to,
+                        base64: base64,
+                        mimetype: file.type || 'application/octet-stream',
+                        filename: file.name || 'fichier',
+                        caption: caption || '',
+                        quotedMessageId: quotedMessageId || ''
+                    })
+                }).then(function(r){return r.json().then(function(d){ if(!r.ok || d.success === false) throw new Error(d.error || ('HTTP '+r.status)); return d; });});
+            });
+        }
+
         // ── SEND MESSAGE ──────────────────────────────────────────
         function wawSend(){
             var inp = document.getElementById('wawInp');
             var msg = inp.value.trim();
-            if (!msg || !wawActiveChatId) return;
+            var file = wawAttachedFile;
+            var replyId = wawReplyTo && wawReplyTo.id;
+            if ((!msg && !file) || !wawActiveChatId) return;
             var ts = Math.floor(Date.now()/1000);
             var timeStr = new Date().toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'});
             var dateStr = new Date().toLocaleDateString('fr-FR');
             var msgId = 'local_'+Date.now();
+            var btn = document.getElementById('wawSendBtn');
+            if (btn) btn.disabled = true;
             // Optimistically add to DB
             var entry = {
                 id: msgId,
                 from: waMyPhone,
-                body: msg,
+                body: msg || (file ? '[media]' : ''),
                 fromMe: true,
                 ts: ts,
                 time: timeStr,
                 date: dateStr,
                 read: true,
-                delivered: false
+                delivered: false,
+                quotedMessageId: replyId || '',
+                hasMedia: !!file,
+                mediaType: file ? ((file.type || '').split('/')[0] || 'document') : null,
+                mediaMime: file ? (file.type || 'application/octet-stream') : null,
+                fileName: file ? file.name : null
             };
+            if (file && (file.type || '').indexOf('image/') === 0) {
+                entry.mediaData = document.getElementById('wawAttachThumb').src;
+            }
             waDB_mergeMsgs(wawActiveChatId, [entry]);
             inp.value = '';
             inp.style.height = '21px';
+            if (file) wawRemoveAttach();
+            if (replyId) wawCancelReply();
             wawRenderMsgsFromDB();
             // Send via Railway/Baileys
             // wawActiveChatId peut être un numéro propre ou un JID complet
             var toJid = wawActiveChatId.indexOf('@') !== -1
                 ? wawActiveChatId
                 : wawActiveChatId.replace(/\D/g,'') + '@s.whatsapp.net';
-            fetch(RAILWAY_API+'/whatsapp/send',{
-                method:'POST',
-                headers:{'Content-Type':'application/json'},
-                body:JSON.stringify({to:toJid, message:msg})
-            }).then(function(r){return r.json();}).then(function(d){
+            var sendPromise = file
+                ? wawSendMediaBase64(toJid, file, msg, replyId)
+                : fetch(RAILWAY_API+(replyId?'/whatsapp/reply':'/whatsapp/send'),{
+                    method:'POST',
+                    headers:{'Content-Type':'application/json'},
+                    body:JSON.stringify(replyId
+                        ? {chatId:toJid, messageId:replyId, message:msg}
+                        : {to:toJid, message:msg})
+                }).then(function(r){return r.json();});
+
+            sendPromise.then(function(d){
                 if(d.success||d.id){
                     var msgs2=waDB_loadMsgs(wawActiveChatId);
                     var m2=msgs2.find(function(x){return x.id===msgId;});
-                    if(m2){m2.delivered=true; waDB_saveMsgs(wawActiveChatId,msgs2);}
+                    if(m2){m2.delivered=true; if (d.messageId) m2.serverId = d.messageId; waDB_saveMsgs(wawActiveChatId,msgs2);}
                     wawRenderMsgsFromDB(); wawBuildAllChats(); wawRenderChatList();
                 } else { toast('⚠️ Erreur envoi: '+(d.error||''),'var(--amber)'); }
-            }).catch(function(){ toast('⚠️ Erreur réseau Railway','var(--amber)'); });
+            }).catch(function(e){ toast('⚠️ Erreur envoi: '+(e.message || 'Railway'),'var(--amber)'); })
+              .finally(function(){ if (btn) btn.disabled = false; });
         }
         function wawAutoResize(el){
             el.style.height = 'auto';
             el.style.height = Math.min(el.scrollHeight, 120) + 'px';
         }
+        function wawHandlePaste(e){
+            if (!waChatOpen || !wawActiveChatId) return;
+            var items = (e.clipboardData && e.clipboardData.items) || [];
+            for (var i = 0; i < items.length; i++) {
+                if (items[i].kind === 'file') {
+                    var file = items[i].getAsFile();
+                    if (!file) continue;
+                    if (!file.name) {
+                        var ext = ((file.type || '').split('/')[1] || 'png').replace('jpeg','jpg');
+                        file = new File([file], 'media-colle-' + Date.now() + '.' + ext, { type: file.type || 'image/png' });
+                    }
+                    e.preventDefault();
+                    wawAttachFile(file);
+                    return;
+                }
+            }
+        }
+        function wawInstallMediaDrop(){
+            if (window.__wawMediaDropInstalled) return;
+            var targets = [document.getElementById('wawComposeWrap'), document.getElementById('wawMsgs')];
+            if (!targets[0] && !targets[1]) return;
+            window.__wawMediaDropInstalled = true;
+            document.addEventListener('paste', wawHandlePaste);
+            targets.forEach(function(el){
+                if (!el) return;
+                el.addEventListener('dragover', function(e){ if (!wawActiveChatId) return; e.preventDefault(); el.classList.add('waw-drop-active'); });
+                el.addEventListener('dragleave', function(){ el.classList.remove('waw-drop-active'); });
+                el.addEventListener('drop', function(e){
+                    if (!wawActiveChatId) return;
+                    e.preventDefault();
+                    el.classList.remove('waw-drop-active');
+                    var file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+                    if (file) wawAttachFile(file);
+                });
+            });
+        }
+        setTimeout(wawInstallMediaDrop, 0);
+        window.addEventListener('load', wawInstallMediaDrop);
 
         // ── MESSAGE SEARCH (within conversation) ──────────────────
         function wawSearchMsgs(q){
@@ -6559,8 +6808,9 @@
                         toast('⚠️ '+(res.error||'Erreur Railway'),'var(--amber)');
                         return;
                     }
-                    var rawGroups   = res.groups   || [];
-                    var rawContacts = res.contacts  || [];
+                    var rawChats    = res.chats || [];
+                    var rawGroups   = res.groups   || rawChats.filter(function(c){ return c.isGroup; });
+                    var rawContacts = res.contacts  || rawChats.filter(function(c){ return !c.isGroup; });
                     var saved = waDB_loadChats();
                     var added = 0;
 
@@ -6572,23 +6822,23 @@
                         if(!exists){
                             saved.push({ id:'wa_'+Date.now()+'_'+Math.random().toString(36).slice(2,7),
                                 umId:id, phone:id, emoji:'👥', name:name,
-                                desc:'Groupe WhatsApp', isGroup:true });
+                                desc:'Groupe WhatsApp', isGroup:true, picture:g.picture||g.profilePicUrl||'' });
                             added++;
-                        } else { exists.name=name||exists.name; exists.umId=id; }
+                        } else { exists.name=name||exists.name; exists.umId=id; if(g.picture||g.profilePicUrl){ exists.picture=g.picture||g.profilePicUrl; exists.profilePicUrl=exists.picture; } }
                     });
 
                     rawContacts.forEach(function(ct){
                         var id   = ct.id || '';
                         var num  = ct.id ? ct.id.replace('@s.whatsapp.net','') : '';
                         var name = ct.name || num;
-                        if(!num||!name||name===num) return;
+                        if(!num||!name) return;
                         var exists = saved.find(function(x){ return x.umId===id||x.phone===num; });
                         if(!exists){
                             saved.push({ id:'wa_'+Date.now()+'_'+Math.random().toString(36).slice(2,7),
                                 umId:id, phone:num, emoji:'👤', name:name,
-                                desc:num, isGroup:false });
+                                desc:num, isGroup:false, picture:ct.picture||ct.profilePicUrl||'' });
                             added++;
-                        } else { exists.name=name||exists.name; }
+                        } else { exists.name=name||exists.name; if(ct.picture||ct.profilePicUrl){ exists.picture=ct.picture||ct.profilePicUrl; exists.profilePicUrl=exists.picture; } }
                     });
 
                     waDB_saveChats(saved);
@@ -7021,6 +7271,7 @@
                             <span id="wawMsgSearchCount" style="display:none;position:absolute;right:6px;top:50%;transform:translateY(-50%);font-size:8px;color:#d4853a;font-family:var(--mono)"></span>
                         </div>
                         <button class="waw-conv-act-btn" onclick="wawFetchConvFromAPI()" title="Actualiser messages"><i class="fas fa-sync-alt" id="wawConvSyncIcon"></i></button>
+                        <button class="waw-conv-act-btn" onclick="wawDeleteConversation()" title="Supprimer conversation"><i class="fas fa-trash-alt"></i></button>
                         <button class="waw-conv-act-btn" onclick="wawCloseConv()" title="Fermer conversation">✕</button>
                     </div>
                     <!-- Messages area -->
@@ -7037,14 +7288,35 @@
                         <button class="waw-qb-btn" onclick="wawInsert('end')">⏹ Fin shift</button>
                     </div>
                     <!-- Input bar -->
-                    <div class="waw-input-bar">
-                        <button class="waw-icon-btn" onclick="wawToggleQuick()" title="Templates">⚡</button>
-                        <div class="waw-inp-wrap">
-                            <textarea class="waw-inp" id="wawInp" rows="1" placeholder="Message..."
-                                onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();wawSend();}"
-                                oninput="wawAutoResize(this)"></textarea>
+                    <div class="waw-compose-wrap" id="wawComposeWrap">
+                        <div class="waw-reply-preview" id="wawReplyPreview">
+                            <i class="fas fa-reply" style="color:#25D366"></i>
+                            <div class="waw-reply-body">
+                                <div class="waw-reply-title" id="wawReplyTitle">Réponse</div>
+                                <div class="waw-reply-text" id="wawReplyText"></div>
+                            </div>
+                            <button class="waw-attach-remove" onclick="wawCancelReply()" title="Annuler réponse"><i class="fas fa-times"></i></button>
                         </div>
-                        <button class="waw-send-btn" id="wawSendBtn" onclick="wawSend()" title="Envoyer"><i class="fas fa-paper-plane"></i></button>
+                        <div class="waw-attach-preview" id="wawAttachPreview">
+                            <img class="waw-attach-thumb" id="wawAttachThumb" alt="">
+                            <div class="waw-attach-ico" id="wawAttachIcon"><i class="fas fa-file"></i></div>
+                            <div class="waw-attach-meta">
+                                <div class="waw-attach-name" id="wawAttachName">fichier</div>
+                                <div class="waw-attach-size" id="wawAttachSize"></div>
+                            </div>
+                            <button class="waw-attach-remove" onclick="wawRemoveAttach()" title="Retirer"><i class="fas fa-times"></i></button>
+                        </div>
+                        <div class="waw-input-bar">
+                            <button class="waw-icon-btn" onclick="wawToggleQuick()" title="Templates">⚡</button>
+                            <button class="waw-icon-btn" onclick="document.getElementById('wawFileInput').click()" title="Joindre photo ou fichier"><i class="fas fa-paperclip"></i></button>
+                            <input id="wawFileInput" type="file" accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.csv,.txt" style="display:none" onchange="wawHandleFile(this)">
+                            <div class="waw-inp-wrap">
+                                <textarea class="waw-inp" id="wawInp" rows="1" placeholder="Message..."
+                                    onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();wawSend();}"
+                                    oninput="wawAutoResize(this)"></textarea>
+                            </div>
+                            <button class="waw-send-btn" id="wawSendBtn" onclick="wawSend()" title="Envoyer"><i class="fas fa-paper-plane"></i></button>
+                        </div>
                     </div>
                 </div>
             </div>
