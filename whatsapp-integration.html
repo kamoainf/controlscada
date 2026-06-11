@@ -1,325 +1,1452 @@
 <!--
   ╔══════════════════════════════════════════════════════════════════╗
-  ║  KAMOA — PATCH WhatsApp QR Code (Evolution API + Railway)       ║
-  ║  À coller juste avant </body> dans index.html                   ║
-  ║  Frontend: https://controlscada.pages.dev/                      ║
-  ║  Backend:  https://controlscada-production.up.railway.app       ║
+  ║  KAMOA — WhatsApp Hub  v3.1                                      ║
+  ║  À coller juste avant </body> dans index.html                    ║
+  ║  Remplace whatsapp-integration.html                              ║
+  ║  Inclut : QR Connect · Liste chats · Envoi · Médias · Suppression║
   ╚══════════════════════════════════════════════════════════════════╝
 -->
 
-<!-- ═══ MODAL QR CODE WHATSAPP ═══════════════════════════════════════════════ -->
-<div id="waQrModal" style="
-    display:none; position:fixed; inset:0; z-index:9999;
-    background:rgba(0,0,0,.75); backdrop-filter:blur(6px);
-    align-items:center; justify-content:center;">
-  <div style="
-      background:#111b21; border:1px solid #2a3942; border-radius:20px;
-      padding:30px 32px; max-width:380px; width:90%; text-align:center;
-      box-shadow:0 20px 60px rgba(0,0,0,.6);">
-    <!-- Header -->
-    <div style="display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:6px">
-      <i class="fab fa-whatsapp" style="color:#25D366;font-size:26px"></i>
-      <span style="font-family:'Rajdhani',sans-serif;font-size:20px;font-weight:700;color:#e9edef">KAMOA WhatsApp</span>
-    </div>
-    <div style="font-size:11px;color:#8696a0;font-family:monospace;margin-bottom:20px" id="waQrInstanceLabel">
-      Instance: kamoa-instance-1
-    </div>
+<!-- ═══ STYLES ════════════════════════════════════════════════════════════════ -->
+<style>
+/* ── Reset hub ── */
+#waHub * { box-sizing: border-box; }
 
-    <!-- Zone QR -->
-    <div id="waQrBox" style="
-        background:#fff; border-radius:14px; padding:14px;
-        display:inline-flex; align-items:center; justify-content:center;
-        min-width:200px; min-height:200px; margin-bottom:16px; position:relative;">
+/* ── Overlay ── */
+#waHub {
+  display: none;
+  position: fixed; inset: 0; z-index: 9990;
+  background: rgba(0,0,0,.82);
+  backdrop-filter: blur(8px);
+  align-items: center;
+  justify-content: center;
+  font-family: 'Inter', system-ui, sans-serif;
+}
+#waHub.open { display: flex; }
+
+/* ── Fenêtre principale ── */
+#waHubWin {
+  background: #111b21;
+  border: 1px solid #2a3942;
+  border-radius: 18px;
+  width: min(1080px, 96vw);
+  height: min(720px, 92vh);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 24px 80px rgba(0,0,0,.7);
+}
+
+/* ── Header ── */
+#waHubHeader {
+  background: #202c33;
+  padding: 12px 20px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid #2a3942;
+  flex-shrink: 0;
+}
+#waHubHeader .title {
+  font-family: 'Rajdhani', sans-serif;
+  font-weight: 700;
+  font-size: 18px;
+  color: #e9edef;
+  flex: 1;
+}
+#waHubHeader .pill {
+  font-size: 11px;
+  font-family: monospace;
+  padding: 3px 10px;
+  border-radius: 20px;
+  border: 1px solid;
+}
+#waHubHeader .pill.on  { color: #25D366; border-color: #25D366; background: rgba(37,211,102,.1); }
+#waHubHeader .pill.off { color: #8696a0; border-color: #2a3942; }
+#waHubHeader button {
+  background: rgba(255,255,255,.07);
+  border: 1px solid #2a3942;
+  color: #8696a0;
+  padding: 6px 14px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: background .15s;
+}
+#waHubHeader button:hover { background: rgba(255,255,255,.12); color: #e9edef; }
+#waHubHeader .close-btn {
+  background: rgba(232,85,85,.12);
+  border-color: rgba(232,85,85,.3);
+  color: #e85555;
+}
+#waHubHeader .close-btn:hover { background: rgba(232,85,85,.25); }
+
+/* ── Corps : sidebar + messages ── */
+#waHubBody {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+/* ── Sidebar (liste des chats) ── */
+#waHubSidebar {
+  width: 340px;
+  flex-shrink: 0;
+  border-right: 1px solid #2a3942;
+  display: flex;
+  flex-direction: column;
+  background: #111b21;
+}
+#waHubSearch {
+  padding: 10px 12px;
+  border-bottom: 1px solid #2a3942;
+  flex-shrink: 0;
+}
+#waHubSearch input {
+  width: 100%;
+  background: #202c33;
+  border: 1px solid #2a3942;
+  border-radius: 8px;
+  color: #e9edef;
+  padding: 8px 12px;
+  font-size: 13px;
+  outline: none;
+}
+#waHubSearch input::placeholder { color: #8696a0; }
+#waHubSearch input:focus { border-color: #25D366; }
+
+#waHubChatList {
+  flex: 1;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: #2a3942 transparent;
+}
+#waHubChatList::-webkit-scrollbar { width: 4px; }
+#waHubChatList::-webkit-scrollbar-thumb { background: #2a3942; border-radius: 2px; }
+
+.wa-chat-item {
+  display: flex;
+  align-items: center;
+  padding: 10px 12px;
+  gap: 10px;
+  cursor: pointer;
+  border-bottom: 1px solid #1a2730;
+  transition: background .1s;
+  position: relative;
+}
+.wa-chat-item:hover { background: #182229; }
+.wa-chat-item.active { background: #2a3942; }
+
+.wa-chat-avatar {
+  width: 44px; height: 44px;
+  border-radius: 50%;
+  background: #2a3942;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 18px;
+  flex-shrink: 0;
+  overflow: hidden;
+  color: #8696a0;
+}
+.wa-chat-avatar img { width: 100%; height: 100%; object-fit: cover; }
+
+.wa-chat-info { flex: 1; min-width: 0; }
+.wa-chat-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: #e9edef;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wa-chat-preview {
+  font-size: 12px;
+  color: #8696a0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 2px;
+}
+.wa-chat-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.wa-chat-time { font-size: 11px; color: #8696a0; }
+.wa-unread {
+  background: #25D366;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: 10px;
+  padding: 1px 6px;
+  min-width: 18px;
+  text-align: center;
+}
+.wa-delete-btn {
+  display: none;
+  background: rgba(232,85,85,.15);
+  border: 1px solid rgba(232,85,85,.3);
+  color: #e85555;
+  padding: 4px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 11px;
+  flex-shrink: 0;
+  transition: background .15s;
+}
+.wa-chat-item:hover .wa-delete-btn { display: inline-flex; align-items: center; gap: 4px; }
+.wa-delete-btn:hover { background: rgba(232,85,85,.3); }
+
+#waHubEmpty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: #8696a0;
+  font-size: 12px;
+  gap: 8px;
+  padding: 20px;
+  text-align: center;
+}
+#waHubEmpty .ico { font-size: 36px; opacity: .4; }
+
+/* ── Panneau de messages ── */
+#waHubMsgPanel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: #0b141a;
+  /* fond style WhatsApp */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='60' height='60'%3E%3Ccircle cx='30' cy='30' r='1' fill='%23ffffff08'/%3E%3C/svg%3E");
+}
+
+/* Placeholder quand aucun chat sélectionné */
+#waHubNone {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: #8696a0;
+}
+#waHubNone .ico { font-size: 60px; opacity: .3; }
+#waHubNone p { font-size: 13px; }
+
+/* Header du chat ouvert */
+#waHubChatHeader {
+  display: none;
+  background: #202c33;
+  padding: 10px 16px;
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid #2a3942;
+  flex-shrink: 0;
+}
+#waHubChatHeader.show { display: flex; }
+#waHubChatHeader .av {
+  width: 40px; height: 40px; border-radius: 50%;
+  background: #2a3942;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 16px; color: #8696a0; overflow: hidden; flex-shrink: 0;
+}
+#waHubChatHeader .av img { width: 100%; height: 100%; object-fit: cover; }
+#waHubChatHeader .info { flex: 1; }
+#waHubChatHeader .name { font-size: 15px; font-weight: 600; color: #e9edef; }
+#waHubChatHeader .sub  { font-size: 11px; color: #8696a0; margin-top: 1px; }
+
+/* Zone de messages */
+#waHubMsgList {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  scrollbar-width: thin;
+  scrollbar-color: #2a3942 transparent;
+}
+#waHubMsgList::-webkit-scrollbar { width: 4px; }
+#waHubMsgList::-webkit-scrollbar-thumb { background: #2a3942; }
+
+/* Bulles */
+.wa-bubble {
+  max-width: 72%;
+  padding: 7px 10px 5px;
+  border-radius: 10px;
+  font-size: 13px;
+  line-height: 1.4;
+  position: relative;
+  word-break: break-word;
+}
+.wa-bubble.in  {
+  background: #202c33;
+  color: #e9edef;
+  align-self: flex-start;
+  border-top-left-radius: 3px;
+}
+.wa-bubble.out {
+  background: #005c4b;
+  color: #e9edef;
+  align-self: flex-end;
+  border-top-right-radius: 3px;
+}
+.wa-bubble .sender {
+  font-size: 11px;
+  font-weight: 600;
+  color: #25D366;
+  margin-bottom: 3px;
+}
+.wa-bubble .ts {
+  font-size: 10px;
+  color: #8696a0;
+  text-align: right;
+  margin-top: 3px;
+}
+.wa-bubble .ts .tick { margin-left: 3px; color: #53bdeb; }
+
+/* Médias dans les bulles */
+.wa-media-img {
+  max-width: 260px;
+  max-height: 260px;
+  border-radius: 8px;
+  display: block;
+  cursor: pointer;
+  object-fit: cover;
+}
+.wa-media-video {
+  max-width: 260px;
+  border-radius: 8px;
+  display: block;
+}
+.wa-media-audio {
+  width: 220px;
+  height: 36px;
+  accent-color: #25D366;
+}
+.wa-media-doc {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: rgba(255,255,255,.07);
+  border-radius: 8px;
+  text-decoration: none;
+  color: #e9edef;
+  font-size: 12px;
+  cursor: pointer;
+}
+.wa-media-doc:hover { background: rgba(255,255,255,.12); }
+.wa-media-doc .icon { font-size: 22px; }
+
+/* Bouton "charger le média" */
+.wa-load-media {
+  background: rgba(37,211,102,.12);
+  border: 1px solid rgba(37,211,102,.3);
+  color: #25D366;
+  padding: 5px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 12px;
+  margin-top: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.wa-load-media:hover { background: rgba(37,211,102,.22); }
+.wa-load-media.loading { opacity: .6; pointer-events: none; }
+
+/* Date separateur */
+.wa-date-sep {
+  align-self: center;
+  background: rgba(17,27,33,.9);
+  border: 1px solid #2a3942;
+  color: #8696a0;
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 10px;
+  margin: 8px 0;
+}
+
+/* ── Barre d'envoi ── */
+#waHubSendBar {
+  display: none;
+  padding: 10px 16px;
+  background: #202c33;
+  border-top: 1px solid #2a3942;
+  flex-shrink: 0;
+  flex-direction: column;
+  gap: 8px;
+}
+#waHubSendBar.show { display: flex; }
+
+/* Preview fichier */
+#waFilePreview {
+  display: none;
+  background: #0b141a;
+  border: 1px solid #2a3942;
+  border-radius: 10px;
+  padding: 10px 12px;
+  align-items: center;
+  gap: 10px;
+}
+#waFilePreview.show { display: flex; }
+#waFilePreview .thumb {
+  max-width: 60px;
+  max-height: 60px;
+  border-radius: 6px;
+  object-fit: cover;
+}
+#waFilePreview .finfo { flex: 1; font-size: 12px; color: #e9edef; }
+#waFilePreview .finfo small { color: #8696a0; display: block; margin-top: 2px; }
+#waFilePreview .rem {
+  background: transparent;
+  border: none;
+  color: #8696a0;
+  cursor: pointer;
+  font-size: 18px;
+  padding: 0;
+}
+#waFilePreview .rem:hover { color: #e85555; }
+
+.wa-send-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+.wa-attach-btn {
+  background: rgba(255,255,255,.07);
+  border: 1px solid #2a3942;
+  color: #8696a0;
+  width: 40px; height: 40px;
+  border-radius: 10px;
+  cursor: pointer;
+  font-size: 16px;
+  flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  transition: background .15s;
+}
+.wa-attach-btn:hover { background: rgba(37,211,102,.15); color: #25D366; border-color: #25D366; }
+
+#waHubInput {
+  flex: 1;
+  background: #2a3942;
+  border: 1px solid #3d4f5c;
+  border-radius: 10px;
+  color: #e9edef;
+  padding: 9px 14px;
+  font-size: 13px;
+  resize: none;
+  outline: none;
+  max-height: 100px;
+  min-height: 40px;
+  line-height: 1.4;
+  font-family: inherit;
+  scrollbar-width: thin;
+}
+#waHubInput::placeholder { color: #8696a0; }
+#waHubInput:focus { border-color: #25D366; }
+
+.wa-send-btn {
+  background: #25D366;
+  border: none;
+  color: #fff;
+  width: 40px; height: 40px;
+  border-radius: 10px;
+  cursor: pointer;
+  font-size: 16px;
+  flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  transition: background .15s;
+}
+.wa-send-btn:hover  { background: #20bd5a; }
+.wa-send-btn:active { background: #1aa34a; }
+.wa-send-btn.sending { opacity: .6; pointer-events: none; }
+
+/* ── Lightbox image ── */
+#waLightbox {
+  display: none;
+  position: fixed; inset: 0; z-index: 10000;
+  background: rgba(0,0,0,.95);
+  align-items: center;
+  justify-content: center;
+  cursor: zoom-out;
+}
+#waLightbox.open { display: flex; }
+#waLightbox img {
+  max-width: 90vw;
+  max-height: 90vh;
+  border-radius: 8px;
+  box-shadow: 0 0 60px rgba(0,0,0,.8);
+}
+
+/* ── Toast ── */
+#waToast {
+  position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+  background: #202c33;
+  border: 1px solid #2a3942;
+  color: #e9edef;
+  padding: 10px 20px;
+  border-radius: 10px;
+  font-size: 13px;
+  z-index: 10001;
+  opacity: 0;
+  transition: opacity .3s;
+  pointer-events: none;
+  white-space: nowrap;
+}
+#waToast.show { opacity: 1; }
+
+/* ── Responsive ── */
+@media (max-width: 640px) {
+  #waHubSidebar { width: 100%; position: absolute; z-index: 2; height: 100%; }
+  #waHubSidebar.hidden { display: none; }
+  #waHubMsgPanel { width: 100%; }
+}
+
+/* ── Modal QR (réutilisé) ── */
+#waQrModal {
+  display: none; position: fixed; inset: 0; z-index: 9999;
+  background: rgba(0,0,0,.75); backdrop-filter: blur(6px);
+  align-items: center; justify-content: center;
+}
+#waQrModal.open { display: flex; }
+</style>
+
+<!-- ═══ TOAST ════════════════════════════════════════════════════════════════ -->
+<div id="waToast"></div>
+
+<!-- ═══ LIGHTBOX ════════════════════════════════════════════════════════════ -->
+<div id="waLightbox" onclick="waLightboxClose()">
+  <img id="waLightboxImg" src="" alt="">
+</div>
+
+<!-- ═══ MODAL QR ════════════════════════════════════════════════════════════ -->
+<div id="waQrModal">
+  <div style="background:#111b21;border:1px solid #2a3942;border-radius:20px;
+       padding:28px 30px;max-width:360px;width:90%;text-align:center;
+       box-shadow:0 20px 60px rgba(0,0,0,.6);">
+    <div style="display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:6px">
+      <i class="fab fa-whatsapp" style="color:#25D366;font-size:24px"></i>
+      <span style="font-family:'Rajdhani',sans-serif;font-size:19px;font-weight:700;color:#e9edef">KAMOA WhatsApp</span>
+    </div>
+    <div id="waQrInstanceLabel" style="font-size:11px;color:#8696a0;font-family:monospace;margin-bottom:16px">Instance: kamoa-instance-1</div>
+
+    <div id="waQrBox" style="background:#fff;border-radius:12px;padding:12px;
+         display:inline-flex;align-items:center;justify-content:center;
+         min-width:190px;min-height:190px;margin-bottom:14px;position:relative;">
       <div id="waQrSpinner" style="text-align:center;color:#555">
-        <div style="font-size:30px;margin-bottom:8px">🔄</div>
+        <div style="font-size:28px;margin-bottom:6px">🔄</div>
         <div style="font-size:11px;font-family:monospace">Génération du QR…</div>
       </div>
-      <img id="waQrImg" style="display:none;width:200px;height:200px;border-radius:8px" alt="QR Code WhatsApp">
+      <img id="waQrImg" style="display:none;width:190px;height:190px;border-radius:6px" alt="QR">
     </div>
 
-    <!-- Statut -->
-    <div id="waQrStatus" style="
-        font-family:monospace;font-size:11px;
-        color:#8696a0;margin-bottom:18px;line-height:1.6">
+    <div id="waQrStatus" style="font-family:monospace;font-size:11px;color:#8696a0;margin-bottom:14px;line-height:1.6">
       Connexion au serveur Railway…
     </div>
-
-    <!-- Barre de progression QR expiration -->
-    <div style="background:#2a3942;border-radius:4px;height:4px;margin-bottom:18px;overflow:hidden">
+    <div style="background:#2a3942;border-radius:4px;height:4px;margin-bottom:14px;overflow:hidden">
       <div id="waQrProgressBar" style="height:100%;background:#25D366;width:100%;transition:width .5s linear;border-radius:4px"></div>
     </div>
-
-    <!-- Boutons -->
-    <div style="display:flex;gap:10px;flex-wrap:wrap;justify-content:center">
-      <button onclick="waQrRefresh()" style="
-          background:rgba(37,211,102,.12);border:1px solid rgba(37,211,102,.3);
-          color:#25D366;padding:9px 18px;border-radius:10px;cursor:pointer;
+    <div style="display:flex;gap:8px;justify-content:center">
+      <button onclick="waQrRefresh()" style="background:rgba(37,211,102,.12);border:1px solid rgba(37,211,102,.3);
+          color:#25D366;padding:8px 16px;border-radius:9px;cursor:pointer;
           font-family:'Rajdhani',sans-serif;font-weight:700;font-size:13px">
-        <i class="fas fa-sync-alt"></i> Actualiser QR
+        <i class="fas fa-sync-alt"></i> Actualiser
       </button>
-      <button onclick="waQrModalClose()" style="
-          background:rgba(255,255,255,.06);border:1px solid #2a3942;
-          color:#8696a0;padding:9px 18px;border-radius:10px;cursor:pointer;
+      <button onclick="waQrModalClose()" style="background:rgba(255,255,255,.06);border:1px solid #2a3942;
+          color:#8696a0;padding:8px 16px;border-radius:9px;cursor:pointer;
           font-family:'Rajdhani',sans-serif;font-weight:700;font-size:13px">
         ✕ Fermer
       </button>
     </div>
-
-    <!-- Connecté -->
     <div id="waQrConnected" style="display:none;margin-top:14px">
-      <div style="font-size:36px;margin-bottom:8px">✅</div>
-      <div style="font-family:'Rajdhani',sans-serif;font-size:16px;font-weight:700;color:#25D366">WhatsApp Connecté!</div>
-      <div style="font-size:10px;color:#8696a0;font-family:monospace;margin-top:4px" id="waQrConnPhone"></div>
-      <button onclick="waQrModalClose()" style="
-          margin-top:14px;background:#25D366;border:none;color:#fff;
-          padding:10px 24px;border-radius:10px;cursor:pointer;
-          font-family:'Rajdhani',sans-serif;font-weight:700;font-size:14px">
-        Commencer à utiliser →
-      </button>
+      <div style="font-size:34px;margin-bottom:6px">✅</div>
+      <div style="font-family:'Rajdhani',sans-serif;font-size:15px;font-weight:700;color:#25D366">WhatsApp Connecté!</div>
+      <div id="waQrConnPhone" style="font-size:11px;color:#8696a0;font-family:monospace;margin-top:4px"></div>
     </div>
   </div>
 </div>
 
-<!-- ═══ BOUTON DANS LE HEADER (à placer manuellement si besoin) ══════════════
-  Ajouter dans la div .nav-btns du header :
-  <button class="wa-btn" onclick="waQrModalOpen()" id="waQrHeaderBtn">
-    <i class="fab fa-whatsapp"></i> QR Connect
-  </button>
-══════════════════════════════════════════════════════════════════════════════ -->
+<!-- ═══ HUB PRINCIPAL ════════════════════════════════════════════════════════ -->
+<div id="waHub">
+  <div id="waHubWin">
 
+    <!-- Header -->
+    <div id="waHubHeader">
+      <i class="fab fa-whatsapp" style="color:#25D366;font-size:22px"></i>
+      <span class="title">KAMOA WhatsApp</span>
+      <span id="waHubStatusPill" class="pill off">Déconnecté</span>
+      <button id="waHubLogoutBtn" onclick="waHubDoLogout()" style="display:none">
+        <i class="fas fa-sign-out-alt"></i> Déconnecter
+      </button>
+      <button onclick="waHubRefreshChats()"><i class="fas fa-sync-alt"></i> Sync</button>
+      <button onclick="waQrModalOpen()"><i class="fab fa-whatsapp"></i> QR</button>
+      <button class="close-btn" onclick="waHubClose()">✕ Fermer</button>
+    </div>
+
+    <!-- Corps -->
+    <div id="waHubBody">
+
+      <!-- Sidebar -->
+      <div id="waHubSidebar">
+        <div id="waHubSearch">
+          <input id="waHubSearchInput" type="text" placeholder="🔍 Rechercher une conversation…"
+                 oninput="waHubFilterChats(this.value)">
+        </div>
+        <div id="waHubChatList">
+          <div id="waHubEmpty">
+            <div class="ico">💬</div>
+            <div>Synchronisation en cours…<br>Assurez-vous d'être connecté.</div>
+            <button onclick="waHubRefreshChats()" style="margin-top:8px;background:rgba(37,211,102,.12);
+              border:1px solid rgba(37,211,102,.3);color:#25D366;padding:7px 16px;border-radius:8px;
+              cursor:pointer;font-size:12px">Charger les conversations</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Panel messages -->
+      <div id="waHubMsgPanel">
+
+        <!-- Placeholder vide -->
+        <div id="waHubNone">
+          <div class="ico"><i class="fab fa-whatsapp" style="color:#25D366;opacity:.6"></i></div>
+          <p>Sélectionnez une conversation</p>
+        </div>
+
+        <!-- Header du chat ouvert -->
+        <div id="waHubChatHeader">
+          <div class="av" id="waHubChatAv">👤</div>
+          <div class="info">
+            <div class="name" id="waHubChatName">—</div>
+            <div class="sub"  id="waHubChatSub">—</div>
+          </div>
+          <button onclick="waHubDeleteCurrentChat()" style="background:rgba(232,85,85,.12);
+              border:1px solid rgba(232,85,85,.3);color:#e85555;padding:6px 14px;
+              border-radius:8px;cursor:pointer;font-size:12px">
+            <i class="fas fa-trash"></i> Supprimer
+          </button>
+        </div>
+
+        <!-- Messages -->
+        <div id="waHubMsgList"></div>
+
+        <!-- Barre d'envoi -->
+        <div id="waHubSendBar">
+          <!-- Preview fichier attaché -->
+          <div id="waFilePreview">
+            <img id="waFileThumb" class="thumb" src="" alt="" style="display:none">
+            <div class="finfo">
+              <span id="waFileName">fichier</span>
+              <small id="waFileSize"></small>
+            </div>
+            <button class="rem" onclick="waRemoveAttachment()" title="Retirer">✕</button>
+          </div>
+          <!-- Row d'envoi -->
+          <div class="wa-send-row">
+            <button class="wa-attach-btn" onclick="document.getElementById('waFileInput').click()" title="Joindre un fichier">
+              <i class="fas fa-paperclip"></i>
+            </button>
+            <input type="file" id="waFileInput" accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.zip"
+                   style="display:none" onchange="waHandleFileSelect(this)">
+            <textarea id="waHubInput" rows="1" placeholder="Écrire un message…"
+                      onkeydown="waHubInputKey(event)"
+                      oninput="this.style.height='auto';this.style.height=Math.min(this.scrollHeight,100)+'px'"></textarea>
+            <button class="wa-send-btn" id="waHubSendBtn" onclick="waHubSend()" title="Envoyer">
+              <i class="fas fa-paper-plane"></i>
+            </button>
+          </div>
+        </div>
+
+      </div><!-- /msg panel -->
+    </div><!-- /body -->
+  </div><!-- /win -->
+</div><!-- /hub -->
+
+
+<!-- ═══ SCRIPT ════════════════════════════════════════════════════════════════ -->
 <script>
-// ═══ CONFIG RAILWAY BACKEND ════════════════════════════════════════════════════
-var RAILWAY_API  = 'https://controlscada-production.up.railway.app/api';
-var RAILWAY_WS   = 'wss://controlscada-production.up.railway.app/ws';
+'use strict';
 
-// ═══ ÉTAT GLOBAL ══════════════════════════════════════════════════════════════
+// ── Config ─────────────────────────────────────────────────────────────────────
+var RAILWAY_API = 'https://controlscada-production.up.railway.app/api';
+var RAILWAY_WS  = 'wss://controlscada-production.up.railway.app/ws';
+
+// ── État global ────────────────────────────────────────────────────────────────
+var waHubConnected   = false;
+var waHubPhone       = localStorage.getItem('kmWaPhone') || '';
+var waHubChats       = [];          // liste complète
+var waHubFilteredChats = [];        // après recherche
+var waHubActiveChatId = null;
+var waHubActiveIsGroup = false;
+var waHubMessages    = [];          // messages du chat ouvert
+var waAttachedFile   = null;        // fichier en attente d'envoi
+
+// QR
 var waQrWs          = null;
-var waQrWsOpen      = false;
 var waQrProgressT   = null;
 var waQrExpireSec   = 60;
 var waQrSecondsLeft = 60;
-var waQrConnected   = false;
+var waQrWsOpen      = false;
+var waQrRestInterval = null;
+var _waQrConnected  = false;
 
-// ═══ OUVRIR / FERMER MODAL ════════════════════════════════════════════════════
-function waQrModalOpen() {
-    document.getElementById('waQrModal').style.display = 'flex';
-    waQrStart();
+// ═══════════════════════════════════════════════════════════════════════════════
+// HUB OPEN / CLOSE
+// ═══════════════════════════════════════════════════════════════════════════════
+function waHubOpen() {
+    document.getElementById('waHub').classList.add('open');
+    waHubCheckStatus();
 }
-function waQrModalClose() {
-    document.getElementById('waQrModal').style.display = 'none';
-    waQrStopProgress();
+function waHubClose() {
+    document.getElementById('waHub').classList.remove('open');
 }
 
-// ═══ INITIALISATION : appelle /api/whatsapp/init sur Railway ══════════════════
-async function waQrStart() {
-    waQrSetStatus('Initialisation de l\'instance Railway…');
+// ═══════════════════════════════════════════════════════════════════════════════
+// STATUT & AUTO-CHECK
+// ═══════════════════════════════════════════════════════════════════════════════
+async function waHubCheckStatus() {
     try {
-        const r = await fetch(RAILWAY_API + '/whatsapp/init', { method: 'POST' });
+        const r = await fetch(RAILWAY_API + '/whatsapp/status');
         const d = await r.json();
-        if (!d.success && !d.instanceName) {
-            waQrSetStatus('❌ Erreur init: ' + (d.error || JSON.stringify(d)));
-            return;
-        }
-        document.getElementById('waQrInstanceLabel').textContent = 'Instance: ' + (d.instanceName || 'kamoa-instance-1');
-        waQrSetStatus('Instance prête — connexion WebSocket…');
-        waQrConnectWS();
-    } catch(e) {
-        waQrSetStatus('❌ Impossible de contacter Railway: ' + e.message);
-        // Fallback REST polling si WS non disponible
-        waQrFallbackRest();
+        waHubApplyStatus(d.status, d.phone);
+        if (d.status === 'open') waHubRefreshChats();
+    } catch(e) {}
+}
+
+function waHubApplyStatus(status, phone) {
+    waHubConnected = (status === 'open');
+    if (phone) { waHubPhone = phone; localStorage.setItem('kmWaPhone', phone); }
+
+    var pill = document.getElementById('waHubStatusPill');
+    var logout = document.getElementById('waHubLogoutBtn');
+    if (waHubConnected) {
+        pill.textContent = '✓ ' + (waHubPhone || 'Connecté');
+        pill.className = 'pill on';
+        if (logout) logout.style.display = '';
+    } else {
+        pill.textContent = status === 'connecting' ? '🔄 Connexion…' : '⭘ Déconnecté';
+        pill.className = 'pill off';
+        if (logout) logout.style.display = 'none';
     }
 }
 
-// ═══ WEBSOCKET (temps réel) ════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+// LISTE DES CHATS
+// ═══════════════════════════════════════════════════════════════════════════════
+async function waHubRefreshChats() {
+    try {
+        var r = await fetch(RAILWAY_API + '/whatsapp/chats');
+        var d = await r.json();
+        if (d.success && d.chats) {
+            waHubChats = d.chats;
+            waHubFilteredChats = d.chats;
+            waHubRenderChatList(d.chats);
+        }
+    } catch(e) {
+        waHubToast('❌ ' + e.message, '#e85555');
+    }
+}
+
+function waHubFilterChats(q) {
+    q = q.toLowerCase().trim();
+    waHubFilteredChats = q
+        ? waHubChats.filter(c => (c.name||'').toLowerCase().includes(q))
+        : waHubChats;
+    waHubRenderChatList(waHubFilteredChats);
+}
+
+function waHubRenderChatList(chats) {
+    var el = document.getElementById('waHubChatList');
+    var empty = document.getElementById('waHubEmpty');
+
+    if (!chats || !chats.length) {
+        el.innerHTML = '';
+        el.appendChild(empty);
+        empty.style.display = 'flex';
+        return;
+    }
+    empty.style.display = 'none';
+    el.innerHTML = '';
+
+    chats.forEach(function(chat) {
+        var item = document.createElement('div');
+        item.className = 'wa-chat-item' + (chat.id === waHubActiveChatId ? ' active' : '');
+        item.dataset.chatId = chat.id;
+
+        var ts = chat.timestamp ? waFmtTime(chat.timestamp * 1000) : '';
+        var lastMsg = chat.lastMessage || '';
+        if (lastMsg.length > 35) lastMsg = lastMsg.substring(0, 35) + '…';
+
+        var initials = (chat.name || '?').charAt(0).toUpperCase();
+        var avatarHtml = chat.picture
+            ? '<img src="' + chat.picture + '" onerror="this.style.display=\'none\';this.parentNode.textContent=\'' + initials + '\'">'
+            : initials;
+
+        var unread = chat.unreadCount > 0
+            ? '<span class="wa-unread">' + chat.unreadCount + '</span>' : '';
+
+        item.innerHTML =
+            '<div class="wa-chat-avatar">' + avatarHtml + '</div>' +
+            '<div class="wa-chat-info">' +
+              '<div class="wa-chat-name">' + waEsc(chat.name || chat.id) + (chat.isGroup ? ' <span style="font-size:10px;color:#8696a0">[groupe]</span>' : '') + '</div>' +
+              '<div class="wa-chat-preview">' + waEsc(lastMsg || '') + '</div>' +
+            '</div>' +
+            '<div class="wa-chat-meta"><span class="wa-chat-time">' + ts + '</span>' + unread + '</div>' +
+            '<button class="wa-delete-btn" title="Supprimer la conversation">' +
+              '<i class="fas fa-trash"></i>' +
+            '</button>';
+
+        item.querySelector('.wa-delete-btn').addEventListener('click', function(e) {
+            e.stopPropagation();
+            waHubConfirmDelete(chat.id, chat.name);
+        });
+        item.addEventListener('click', function() { waHubOpenChat(chat); });
+        el.appendChild(item);
+    });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// OUVRIR UN CHAT
+// ═══════════════════════════════════════════════════════════════════════════════
+async function waHubOpenChat(chat) {
+    waHubActiveChatId  = chat.id;
+    waHubActiveIsGroup = chat.isGroup || false;
+
+    // Marquer actif
+    document.querySelectorAll('.wa-chat-item').forEach(function(el) {
+        el.classList.toggle('active', el.dataset.chatId === chat.id);
+    });
+
+    // Afficher header du chat
+    var header = document.getElementById('waHubChatHeader');
+    header.classList.add('show');
+    document.getElementById('waHubNone').style.display = 'none';
+    document.getElementById('waHubChatName').textContent = chat.name || chat.id;
+    document.getElementById('waHubChatSub').textContent  = chat.isGroup ? 'Groupe' : chat.id.replace('@s.whatsapp.net','');
+
+    var av = document.getElementById('waHubChatAv');
+    if (chat.picture) {
+        av.innerHTML = '<img src="' + chat.picture + '" onerror="this.parentNode.textContent=\'👤\'">';
+    } else {
+        av.textContent = (chat.name || '?').charAt(0).toUpperCase();
+    }
+
+    // Barre d'envoi
+    document.getElementById('waHubSendBar').classList.add('show');
+    document.getElementById('waHubInput').focus();
+
+    // Charger les messages
+    await waHubLoadMessages(chat.id);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MESSAGES
+// ═══════════════════════════════════════════════════════════════════════════════
+async function waHubLoadMessages(chatId) {
+    var list = document.getElementById('waHubMsgList');
+    list.innerHTML = '<div style="text-align:center;color:#8696a0;font-size:12px;padding:20px">Chargement…</div>';
+
+    try {
+        var r = await fetch(RAILWAY_API + '/whatsapp/messages?chatId=' + encodeURIComponent(chatId));
+        var d = await r.json();
+        waHubMessages = d.messages || [];
+        waHubRenderMessages(waHubMessages);
+    } catch(e) {
+        list.innerHTML = '<div style="text-align:center;color:#e85555;font-size:12px;padding:20px">Erreur: ' + waEsc(e.message) + '</div>';
+    }
+}
+
+function waHubRenderMessages(messages) {
+    var list = document.getElementById('waHubMsgList');
+    list.innerHTML = '';
+
+    if (!messages || !messages.length) {
+        list.innerHTML = '<div style="text-align:center;color:#8696a0;font-size:12px;padding:30px">Aucun message récent.<br><small>Les messages arriveront en temps réel.</small></div>';
+        return;
+    }
+
+    var lastDate = '';
+    messages.forEach(function(msg) {
+        // Séparateur de date
+        var dateStr = msg.timestamp ? new Date(msg.timestamp * 1000).toLocaleDateString('fr-FR', { day:'numeric', month:'long', year:'numeric' }) : '';
+        if (dateStr && dateStr !== lastDate) {
+            var sep = document.createElement('div');
+            sep.className = 'wa-date-sep';
+            sep.textContent = dateStr;
+            list.appendChild(sep);
+            lastDate = dateStr;
+        }
+
+        list.appendChild(waBuildBubble(msg));
+    });
+
+    // Scroll en bas
+    setTimeout(function() { list.scrollTop = list.scrollHeight; }, 50);
+}
+
+function waBuildBubble(msg) {
+    var div = document.createElement('div');
+    div.className = 'wa-bubble ' + (msg.fromMe ? 'out' : 'in');
+    div.dataset.msgId = msg.id || msg.messageId || '';
+
+    var html = '';
+
+    // Nom expéditeur (groupes, messages entrants)
+    if (!msg.fromMe && msg.isGroup && msg.pushName) {
+        html += '<div class="sender">' + waEsc(msg.pushName) + '</div>';
+    }
+
+    // Contenu
+    if (msg.hasMedia) {
+        html += waBuildMediaHtml(msg);
+    } else {
+        html += '<div>' + waEsc(msg.body || '') + '</div>';
+    }
+
+    // Timestamp
+    var ts = msg.timestamp ? new Date(msg.timestamp * 1000).toLocaleTimeString('fr-FR', { hour:'2-digit', minute:'2-digit' }) : '';
+    var tick = msg.fromMe ? '<span class="tick">✓✓</span>' : '';
+    html += '<div class="ts">' + ts + tick + '</div>';
+
+    div.innerHTML = html;
+    return div;
+}
+
+function waBuildMediaHtml(msg) {
+    var type = msg.mediaType || '';
+    var caption = msg.caption ? '<div style="margin-top:5px;font-size:12px">' + waEsc(msg.caption) + '</div>' : '';
+    var msgId = msg.id || msg.messageId || '';
+
+    if (!msgId) {
+        return '<div style="color:#8696a0;font-size:12px;font-style:italic">[' + (type || 'media') + ']</div>';
+    }
+
+    if (type === 'image' || type === 'sticker') {
+        return '<button class="wa-load-media" onclick="waLoadMedia(this,\'' + msgId + '\',\'image\')">' +
+               '<i class="fas fa-image"></i> Voir l\'image</button>' + caption;
+    }
+    if (type === 'video') {
+        return '<button class="wa-load-media" onclick="waLoadMedia(this,\'' + msgId + '\',\'video\')">' +
+               '<i class="fas fa-video"></i> Voir la vidéo</button>' + caption;
+    }
+    if (type === 'audio' || type === 'ptt') {
+        return '<button class="wa-load-media" onclick="waLoadMedia(this,\'' + msgId + '\',\'audio\')">' +
+               '<i class="fas fa-headphones"></i> Écouter</button>';
+    }
+    if (type === 'document') {
+        return '<button class="wa-load-media" onclick="waLoadMedia(this,\'' + msgId + '\',\'document\')">' +
+               '<i class="fas fa-file"></i> ' + waEsc(msg.fileName || 'Document') + '</button>' + caption;
+    }
+    return '<button class="wa-load-media" onclick="waLoadMedia(this,\'' + msgId + '\',\'file\')">' +
+           '<i class="fas fa-paperclip"></i> Pièce jointe</button>' + caption;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CHARGEMENT DES MÉDIAS (lazy)
+// ═══════════════════════════════════════════════════════════════════════════════
+async function waLoadMedia(btn, msgId, type) {
+    btn.classList.add('loading');
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Chargement…';
+
+    try {
+        var r = await fetch(RAILWAY_API + '/whatsapp/media/' + encodeURIComponent(msgId));
+        var d = await r.json();
+
+        if (!d.success || (!d.data && !d.base64)) {
+            btn.classList.remove('loading');
+            btn.innerHTML = '<i class="fas fa-exclamation-triangle"></i> ' + (d.error || 'Média indisponible');
+            return;
+        }
+
+        var b64  = d.data || d.base64;
+        var mime = d.mimetype || d.mime || 'application/octet-stream';
+        var dataUrl = 'data:' + mime + ';base64,' + b64;
+        var parent  = btn.parentNode;
+
+        if (type === 'image' || type === 'sticker') {
+            var img = document.createElement('img');
+            img.className = 'wa-media-img';
+            img.src = dataUrl;
+            img.onclick = function() { waLightboxOpen(dataUrl); };
+            parent.replaceChild(img, btn);
+
+        } else if (type === 'video') {
+            var vid = document.createElement('video');
+            vid.className = 'wa-media-video';
+            vid.controls = true;
+            vid.src = dataUrl;
+            parent.replaceChild(vid, btn);
+
+        } else if (type === 'audio') {
+            var aud = document.createElement('audio');
+            aud.className = 'wa-media-audio';
+            aud.controls = true;
+            aud.src = dataUrl;
+            parent.replaceChild(aud, btn);
+
+        } else {
+            // Document — lien téléchargement
+            var a = document.createElement('a');
+            a.className = 'wa-media-doc';
+            a.href = dataUrl;
+            a.download = d.fileName || 'document';
+            a.innerHTML = '<span class="icon"><i class="fas fa-file-download"></i></span>' +
+                          '<span>' + waEsc(d.fileName || 'Télécharger') + '</span>';
+            parent.replaceChild(a, btn);
+        }
+
+    } catch(e) {
+        btn.classList.remove('loading');
+        btn.innerHTML = '<i class="fas fa-times"></i> Erreur: ' + waEsc(e.message);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ENVOI DE MESSAGES
+// ═══════════════════════════════════════════════════════════════════════════════
+function waHubInputKey(e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        waHubSend();
+    }
+}
+
+async function waHubSend() {
+    if (!waHubActiveChatId) return;
+    var input = document.getElementById('waHubInput');
+    var btn   = document.getElementById('waHubSendBtn');
+    var text  = input.value.trim();
+
+    if (!text && !waAttachedFile) return;
+    btn.classList.add('sending');
+
+    try {
+        var result;
+
+        if (waAttachedFile) {
+            // Envoi fichier
+            result = await waSendMediaBase64(
+                waHubActiveChatId,
+                waAttachedFile,
+                { caption: text }
+            );
+            waRemoveAttachment();
+        } else {
+            // Envoi texte
+            var endpoint = waHubActiveIsGroup ? '/whatsapp/send-group' : '/whatsapp/send';
+            var body     = waHubActiveIsGroup
+                ? { groupId: waHubActiveChatId, message: text }
+                : { to:      waHubActiveChatId, message: text };
+
+            var r = await fetch(RAILWAY_API + endpoint, {
+                method:  'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body:    JSON.stringify(body),
+            });
+            result = await r.json();
+        }
+
+        if (result.success !== false) {
+            input.value = '';
+            input.style.height = 'auto';
+
+            // Ajouter le message localement (optimiste)
+            var fakeMsg = {
+                id:        result.messageId || ('local-' + Date.now()),
+                chatId:    waHubActiveChatId,
+                from:      waHubActiveChatId,
+                fromMe:    true,
+                body:      text || '[fichier]',
+                timestamp: Math.floor(Date.now() / 1000),
+                hasMedia:  !!waAttachedFile,
+            };
+            waHubMessages.push(fakeMsg);
+            var list = document.getElementById('waHubMsgList');
+            list.appendChild(waBuildBubble(fakeMsg));
+            list.scrollTop = list.scrollHeight;
+        } else {
+            waHubToast('❌ ' + (result.error || 'Échec envoi'), '#e85555');
+        }
+    } catch(e) {
+        waHubToast('❌ ' + e.message, '#e85555');
+    }
+
+    btn.classList.remove('sending');
+}
+
+// Envoi base64 (fichier local)
+async function waSendMediaBase64(to, file, options) {
+    return new Promise(function(resolve, reject) {
+        var reader = new FileReader();
+        reader.onload = async function() {
+            try {
+                var b64 = reader.result.split(',')[1];
+                var r = await fetch(RAILWAY_API + '/whatsapp/send-media-base64', {
+                    method:  'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body:    JSON.stringify({
+                        to:       to,
+                        base64:   b64,
+                        mimetype: file.type || 'application/octet-stream',
+                        filename: file.name || 'fichier',
+                        caption:  (options && options.caption) || '',
+                    }),
+                });
+                resolve(await r.json());
+            } catch(e) { reject(e); }
+        };
+        reader.onerror = function() { reject(new Error('Lecture échouée')); };
+        reader.readAsDataURL(file);
+    });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PIÈCE JOINTE
+// ═══════════════════════════════════════════════════════════════════════════════
+function waHandleFileSelect(input) {
+    var file = input.files[0];
+    if (!file) return;
+    waAttachedFile = file;
+
+    var preview = document.getElementById('waFilePreview');
+    var thumb   = document.getElementById('waFileThumb');
+    var name    = document.getElementById('waFileName');
+    var size    = document.getElementById('waFileSize');
+
+    name.textContent = file.name;
+    size.textContent = waFmtSize(file.size);
+
+    if (file.type.startsWith('image/')) {
+        var reader = new FileReader();
+        reader.onload = function(e) {
+            thumb.src = e.target.result;
+            thumb.style.display = 'block';
+        };
+        reader.readAsDataURL(file);
+    } else {
+        thumb.style.display = 'none';
+    }
+
+    preview.classList.add('show');
+    input.value = '';
+}
+
+function waRemoveAttachment() {
+    waAttachedFile = null;
+    document.getElementById('waFilePreview').classList.remove('show');
+    document.getElementById('waFileThumb').src = '';
+    document.getElementById('waFileThumb').style.display = 'none';
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SUPPRESSION D'UNE CONVERSATION
+// ═══════════════════════════════════════════════════════════════════════════════
+function waHubConfirmDelete(chatId, name) {
+    if (!confirm('Supprimer la conversation avec «' + (name || chatId) + '» ?\n\nCette action est irréversible.')) return;
+    waHubDoDelete(chatId);
+}
+
+async function waHubDoDelete(chatId) {
+    try {
+        var r = await fetch(RAILWAY_API + '/whatsapp/chat/' + encodeURIComponent(chatId), {
+            method: 'DELETE',
+        });
+        var d = await r.json();
+
+        if (d.success) {
+            // Retirer du cache local
+            waHubChats = waHubChats.filter(function(c) { return c.id !== chatId; });
+            waHubFilteredChats = waHubFilteredChats.filter(function(c) { return c.id !== chatId; });
+            waHubRenderChatList(waHubFilteredChats);
+
+            // Si le chat actif est supprimé, fermer le panel
+            if (waHubActiveChatId === chatId) {
+                waHubActiveChatId = null;
+                document.getElementById('waHubChatHeader').classList.remove('show');
+                document.getElementById('waHubNone').style.display = '';
+                document.getElementById('waHubSendBar').classList.remove('show');
+                document.getElementById('waHubMsgList').innerHTML = '';
+            }
+            waHubToast('🗑️ Conversation supprimée', '#25D366');
+        } else {
+            waHubToast('❌ ' + (d.error || 'Erreur suppression'), '#e85555');
+        }
+    } catch(e) {
+        waHubToast('❌ ' + e.message, '#e85555');
+    }
+}
+
+function waHubDeleteCurrentChat() {
+    if (!waHubActiveChatId) return;
+    var chat = waHubChats.find(function(c) { return c.id === waHubActiveChatId; });
+    waHubConfirmDelete(waHubActiveChatId, chat ? chat.name : waHubActiveChatId);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// LOGOUT
+// ═══════════════════════════════════════════════════════════════════════════════
+async function waHubDoLogout() {
+    if (!confirm('Déconnecter WhatsApp et effacer la session ?')) return;
+    try {
+        await fetch(RAILWAY_API + '/whatsapp/logout', { method: 'POST' });
+        waHubApplyStatus('disconnected', null);
+        waHubChats = []; waHubFilteredChats = [];
+        waHubRenderChatList([]);
+        waHubToast('🚪 Session effacée — scannez un nouveau QR', '#8696a0');
+    } catch(e) {}
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// WEBSOCKET TEMPS RÉEL
+// ═══════════════════════════════════════════════════════════════════════════════
+(function waHubConnectWS() {
+    var ws;
+    try {
+        ws = new WebSocket(RAILWAY_WS);
+        ws.onopen = function() { console.log('🔌 Hub WS connecté'); };
+        ws.onmessage = function(ev) {
+            try {
+                var msg = JSON.parse(ev.data);
+                if (msg.type === 'status') {
+                    waHubApplyStatus(msg.status, msg.phone);
+                    if (msg.status === 'open') waHubRefreshChats();
+                } else if (msg.type === 'message' || msg.type === 'whatsapp_message') {
+                    waHubHandleIncoming(msg.data);
+                } else if (msg.type === 'chat_deleted') {
+                    waHubChats = waHubChats.filter(function(c) { return c.id !== msg.chatId; });
+                    waHubFilteredChats = waHubFilteredChats.filter(function(c) { return c.id !== msg.chatId; });
+                    waHubRenderChatList(waHubFilteredChats);
+                }
+            } catch(_) {}
+        };
+        ws.onerror = function() {};
+        ws.onclose = function() { setTimeout(waHubConnectWS, 8000); };
+    } catch(_) { setTimeout(waHubConnectWS, 8000); }
+})();
+
+function waHubHandleIncoming(data) {
+    if (!data) return;
+    // Mettre à jour la liste des chats
+    var idx = waHubChats.findIndex(function(c) { return c.id === data.chatId; });
+    if (idx >= 0) {
+        waHubChats[idx].lastMessage = data.body;
+        waHubChats[idx].timestamp  = data.timestamp;
+        if (!data.fromMe) waHubChats[idx].unreadCount = (waHubChats[idx].unreadCount || 0) + 1;
+    } else {
+        waHubChats.unshift({ id: data.chatId, name: data.name || data.pushName || data.from, lastMessage: data.body, timestamp: data.timestamp, unreadCount: 1, isGroup: data.isGroup });
+    }
+    // Trier par timestamp
+    waHubChats.sort(function(a,b) { return (b.timestamp||0)-(a.timestamp||0); });
+    waHubFilteredChats = waHubChats;
+    waHubRenderChatList(waHubFilteredChats);
+
+    // Si le chat actif → ajouter la bulle
+    if (data.chatId === waHubActiveChatId) {
+        waHubMessages.push(data);
+        var list = document.getElementById('waHubMsgList');
+        list.appendChild(waBuildBubble(data));
+        list.scrollTop = list.scrollHeight;
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// QR MODAL
+// ═══════════════════════════════════════════════════════════════════════════════
+function waQrModalOpen() {
+    document.getElementById('waQrModal').classList.add('open');
+    waQrStart();
+}
+function waQrModalClose() {
+    document.getElementById('waQrModal').classList.remove('open');
+    waQrStopProgress();
+}
+async function waQrStart() {
+    waQrSetStatus('Initialisation…');
+    try {
+        var r = await fetch(RAILWAY_API + '/whatsapp/init', { method: 'POST' });
+        var d = await r.json();
+        if (d.status === 'open') {
+            waHubApplyStatus('open', d.phone);
+            waQrModalClose();
+            return;
+        }
+        waQrSetStatus('Instance prête — connexion WebSocket…');
+        waQrConnectWS();
+    } catch(e) {
+        waQrSetStatus('❌ ' + e.message);
+        waQrFallbackRest();
+    }
+}
 function waQrConnectWS() {
     if (waQrWs) waQrWs.close();
     try {
         waQrWs = new WebSocket(RAILWAY_WS);
-
-        waQrWs.onopen = function() {
-            waQrWsOpen = true;
-            waQrSetStatus('WebSocket connecté — en attente du QR…');
-        };
-
+        waQrWs.onopen = function() { waQrWsOpen = true; waQrSetStatus('WebSocket connecté — en attente du QR…'); };
         waQrWs.onmessage = function(ev) {
             try {
                 var msg = JSON.parse(ev.data);
-                if (msg.type === 'qr') {
-                    waQrShowImage(msg.qr);
-                } else if (msg.type === 'status') {
-                    waQrHandleStatus(msg.status, msg.phone);
-                } else if (msg.type === 'message') {
-                    // Message entrant — mettre à jour le chat si ouvert
-                    if (typeof wawHandleIncoming === 'function') wawHandleIncoming(msg.data);
-                }
+                if (msg.type === 'qr') waQrShowImage(msg.qr);
+                else if (msg.type === 'status') waQrHandleStatus(msg.status, msg.phone);
             } catch(_) {}
         };
-
-        waQrWs.onerror = function() {
-            waQrWsOpen = false;
-            waQrSetStatus('⚠️ WebSocket indisponible — bascule polling REST…');
-            waQrFallbackRest();
-        };
-
+        waQrWs.onerror = function() { waQrWsOpen = false; waQrFallbackRest(); };
         waQrWs.onclose = function() {
             waQrWsOpen = false;
-            if (!waQrConnected) {
-                setTimeout(function(){ if(!waQrConnected) waQrConnectWS(); }, 6000);
-            }
+            if (!_waQrConnected) setTimeout(function(){ if(!_waQrConnected) waQrConnectWS(); }, 6000);
         };
-    } catch(e) {
-        waQrFallbackRest();
-    }
+    } catch(_) { waQrFallbackRest(); }
 }
-
-// ═══ FALLBACK REST POLLING (si WS indisponible) ════════════════════════════════
-var waQrRestInterval = null;
 function waQrFallbackRest() {
     if (waQrRestInterval) return;
-    waQrSetStatus('Polling REST actif (8s)…');
+    waQrSetStatus('Polling REST actif…');
     waQrFetchRest();
     waQrRestInterval = setInterval(waQrFetchRest, 8000);
 }
 async function waQrFetchRest() {
     try {
-        // Status
-        const sr = await fetch(RAILWAY_API + '/whatsapp/status');
-        const sd = await sr.json();
+        var sr = await fetch(RAILWAY_API + '/whatsapp/status');
+        var sd = await sr.json();
         if (sd.status === 'open') { waQrHandleStatus('open', sd.phone); return; }
-
-        // QR
-        const qr = await fetch(RAILWAY_API + '/whatsapp/qrcode');
-        const qd = await qr.json();
+        var qr = await fetch(RAILWAY_API + '/whatsapp/qrcode');
+        var qd = await qr.json();
         if (qd.qrCode) waQrShowImage(qd.qrCode);
-        else waQrSetStatus('En attente du QR Code… (instance connecting)');
-    } catch(e) {
-        waQrSetStatus('⚠️ Polling: ' + e.message);
-    }
+        else waQrSetStatus('En attente du QR Code…');
+    } catch(e) { waQrSetStatus('⚠️ ' + e.message); }
 }
-function waQrStopRestPolling() {
-    if (waQrRestInterval) { clearInterval(waQrRestInterval); waQrRestInterval = null; }
-}
-
-// ═══ AFFICHER QR IMAGE ════════════════════════════════════════════════════════
 function waQrShowImage(base64) {
     var img = document.getElementById('waQrImg');
     var spin = document.getElementById('waQrSpinner');
-    var src = base64.startsWith('data:') ? base64 : 'data:image/png;base64,' + base64;
-    img.src = src;
+    img.src = base64.startsWith('data:') ? base64 : 'data:image/png;base64,' + base64;
     img.style.display = 'block';
     spin.style.display = 'none';
-    waQrSetStatus('📲 Scannez ce QR avec WhatsApp → Menu ⋮ → Appareils connectés → Connecter un appareil');
+    waQrSetStatus('📲 Scannez avec WhatsApp → Menu ⋮ → Appareils connectés');
     waQrStartProgress();
 }
-
-// ═══ STATUT CONNEXION ════════════════════════════════════════════════════════
 function waQrHandleStatus(status, phone) {
     if (status === 'open') {
-        waQrConnected = true;
+        _waQrConnected = true;
         waQrStopProgress();
-        waQrStopRestPolling();
+        if (waQrRestInterval) { clearInterval(waQrRestInterval); waQrRestInterval = null; }
         if (waQrWs) waQrWs.close();
-
-        // Mettre à jour l'interface principale
-        if (phone) {
-            waMyPhone = phone;
-            localStorage.setItem('kmWaPhone', phone);
-        }
-
-        // Afficher écran "connecté"
-        document.getElementById('waQrBox').style.display         = 'none';
-        document.getElementById('waQrStatus').style.display      = 'none';
+        document.getElementById('waQrConnected').style.display = 'block';
+        document.getElementById('waQrBox').style.display = 'none';
+        document.getElementById('waQrStatus').style.display = 'none';
         document.getElementById('waQrProgressBar').parentElement.style.display = 'none';
-        document.getElementById('waQrConnected').style.display   = 'block';
-        document.getElementById('waQrConnPhone').textContent     = phone || '';
-
-        // Toast
-        if (typeof toast === 'function') toast('✅ WhatsApp connecté via Railway!', '#25D366');
-
-        // Fermer la modal après 3s
-        setTimeout(waQrModalClose, 3500);
-
-        // Activer le hub WhatsApp principal
-        if (typeof waApplyState === 'function') waApplyState();
-
+        if (phone) document.getElementById('waQrConnPhone').textContent = phone;
+        waHubApplyStatus('open', phone);
+        waHubToast('✅ WhatsApp connecté!', '#25D366');
+        setTimeout(function() { waQrModalClose(); waHubRefreshChats(); }, 2500);
     } else if (status === 'connecting') {
-        waQrSetStatus('🔄 WhatsApp en cours de connexion… scannez le QR');
-    } else {
-        waQrSetStatus('🔴 Déconnecté (' + status + ')');
+        waQrSetStatus('🔄 En cours de connexion…');
     }
 }
-
-// ═══ BARRE DE PROGRESSION (QR expire 60s) ════════════════════════════════════
 function waQrStartProgress() {
     waQrStopProgress();
     waQrSecondsLeft = waQrExpireSec;
     waQrProgressT = setInterval(function() {
         waQrSecondsLeft--;
         var pct = (waQrSecondsLeft / waQrExpireSec) * 100;
-        document.getElementById('waQrProgressBar').style.width = pct + '%';
-        if (waQrSecondsLeft <= 0) {
-            waQrStopProgress();
-            waQrSetStatus('⏰ QR expiré — actualisation…');
-            waQrRefresh();
-        }
+        var bar = document.getElementById('waQrProgressBar');
+        if (bar) bar.style.width = pct + '%';
+        if (waQrSecondsLeft <= 0) { waQrStopProgress(); waQrSetStatus('⏰ QR expiré — actualisation…'); waQrRefresh(); }
     }, 1000);
 }
 function waQrStopProgress() {
     if (waQrProgressT) { clearInterval(waQrProgressT); waQrProgressT = null; }
 }
-
-// ═══ ACTUALISER QR MANUELLEMENT ══════════════════════════════════════════════
 async function waQrRefresh() {
-    document.getElementById('waQrImg').style.display    = 'none';
+    document.getElementById('waQrImg').style.display = 'none';
     document.getElementById('waQrSpinner').style.display = 'block';
-    document.getElementById('waQrBox').style.display    = 'inline-flex';
+    document.getElementById('waQrBox').style.display = 'inline-flex';
     waQrStopProgress();
-    waQrSetStatus('Rafraîchissement du QR Code…');
-    waQrStopRestPolling();
+    if (waQrRestInterval) { clearInterval(waQrRestInterval); waQrRestInterval = null; }
     await waQrStart();
 }
-
-// ═══ TEXTE DE STATUT ════════════════════════════════════════════════════════
 function waQrSetStatus(txt) {
     var el = document.getElementById('waQrStatus');
     if (el) el.innerHTML = txt;
 }
 
-// ═══ PATCH : Rerouter l'envoi de messages via Railway si connecté ═════════════
-// Remplace les appels UltraMsg par le backend Railway quand connecté via QR
-var _origWaActivate = typeof waActivate === 'function' ? waActivate : null;
+// ═══════════════════════════════════════════════════════════════════════════════
+// LIGHTBOX
+// ═══════════════════════════════════════════════════════════════════════════════
+function waLightboxOpen(src) {
+    document.getElementById('waLightboxImg').src = src;
+    document.getElementById('waLightbox').classList.add('open');
+}
+function waLightboxClose() {
+    document.getElementById('waLightbox').classList.remove('open');
+}
 
-// Intégration dans le bouton header si présent
-(function patchHeaderBtn(){
-    var btn = document.getElementById('waQrHeaderBtn');
-    if (!btn) {
-        // Créer automatiquement si header nav-btns existe
-        var nav = document.querySelector('.nav-btns');
-        if (nav) {
-            var b = document.createElement('button');
-            b.className = 'wa-btn';
-            b.id = 'waQrHeaderBtn';
-            b.onclick = waQrModalOpen;
-            b.innerHTML = '<i class="fab fa-whatsapp"></i> QR Connect';
-            nav.insertBefore(b, nav.firstChild);
-        }
-    } else {
-        btn.onclick = waQrModalOpen;
+// ═══════════════════════════════════════════════════════════════════════════════
+// TOAST
+// ═══════════════════════════════════════════════════════════════════════════════
+var _waToastTimer = null;
+function waHubToast(msg, color) {
+    var el = document.getElementById('waToast');
+    el.textContent = msg;
+    el.style.borderColor = color || '#2a3942';
+    el.classList.add('show');
+    if (_waToastTimer) clearTimeout(_waToastTimer);
+    _waToastTimer = setTimeout(function() { el.classList.remove('show'); }, 3000);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// HELPERS
+// ═══════════════════════════════════════════════════════════════════════════════
+function waEsc(str) {
+    return String(str || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function waFmtTime(ms) {
+    var d = new Date(ms);
+    var now = new Date();
+    if (d.toDateString() === now.toDateString()) {
+        return d.toLocaleTimeString('fr-FR', { hour:'2-digit', minute:'2-digit' });
     }
+    return d.toLocaleDateString('fr-FR', { day:'2-digit', month:'2-digit' });
+}
+function waFmtSize(bytes) {
+    if (bytes < 1024)       return bytes + ' o';
+    if (bytes < 1048576)    return (bytes/1024).toFixed(1) + ' Ko';
+    return (bytes/1048576).toFixed(1) + ' Mo';
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BOUTON HEADER — injection automatique
+// ═══════════════════════════════════════════════════════════════════════════════
+(function patchHeader() {
+    var nav = document.querySelector('.nav-btns');
+    if (!nav) return;
+
+    // Supprimer ancien bouton QR s'il existe
+    var old = document.getElementById('waQrHeaderBtn');
+    if (old) old.remove();
+
+    var btn = document.createElement('button');
+    btn.className = 'wa-btn';
+    btn.id = 'waMainHeaderBtn';
+    btn.onclick = waHubOpen;
+    btn.innerHTML = '<i class="fab fa-whatsapp"></i> WhatsApp';
+    nav.insertBefore(btn, nav.firstChild);
 })();
 
-// Auto-check statut au démarrage (silencieux)
-(async function waAutoCheck(){
+// ═══════════════════════════════════════════════════════════════════════════════
+// AUTO-CHECK AU DÉMARRAGE
+// ═══════════════════════════════════════════════════════════════════════════════
+(async function waAutoStart() {
     try {
-        const r  = await fetch(RAILWAY_API + '/whatsapp/status');
-        const d  = await r.json();
-        if (d.status === 'open' && d.phone) {
-            waConnNumber = d.phone;
-            waMyPhone = d.phone;
-            localStorage.setItem('kmWaPhone', d.phone);
-            if (typeof toast === 'function') toast('📱 WhatsApp actif · ' + d.phone, '#25D366');
-            if (typeof waApplyState === 'function') waApplyState();
+        var r = await fetch(RAILWAY_API + '/whatsapp/status');
+        var d = await r.json();
+        waHubApplyStatus(d.status, d.phone);
+        if (d.status === 'open' && typeof waHubToast === 'function') {
+            waHubToast('📱 WhatsApp actif · ' + (d.phone || ''), '#25D366');
         }
     } catch(_) {}
 })();
+
+console.log('✅ KAMOA WhatsApp Hub v3.1 chargé');
 </script>

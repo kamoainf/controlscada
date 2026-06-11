@@ -1,8 +1,12 @@
 /**
- * KAMOA SCADA — WhatsApp Frontend Integration  v3.0
+ * KAMOA SCADA — WhatsApp Frontend Integration  v3.1
  *
  * Utilise WebSocket natif (/ws) pour les notifications temps réel.
  * Fallback REST polling si le WebSocket n'est pas disponible.
+ *
+ * Nouveautés v3.1 :
+ *   - deleteChat(chatId)              — supprime une conversation
+ *   - sendMediaBase64(to, file, opt)  — envoie un fichier local (File/Blob)
  *
  * Événements émis :
  *   'status'          — { status: 'open'|'connecting'|'disconnected', phone? }
@@ -11,6 +15,7 @@
  *   'message_status'  — { messageId, to, status }
  *   'chats_update'    — { count }
  *   'contacts_update' — { count }
+ *   'chat_deleted'    — { chatId }
  *   'error'           — { message }
  */
 
@@ -51,7 +56,7 @@ class WhatsAppIntegration {
     // WEBSOCKET
     // ─────────────────────────────────────────────────────────────────────────
     _connectWs() {
-        if (this._ws && this._ws.readyState <= 1) return; // already connecting/open
+        if (this._ws && this._ws.readyState <= 1) return;
 
         try {
             this._ws = new WebSocket(this.wsUrl);
@@ -114,6 +119,7 @@ class WhatsAppIntegration {
                 break;
 
             case 'message':
+            case 'whatsapp_message':
                 this.emit('message', msg.data);
                 break;
 
@@ -129,14 +135,17 @@ class WhatsAppIntegration {
                 this.emit('contacts_update', { count: msg.count });
                 break;
 
+            case 'chat_deleted':
+                this.emit('chat_deleted', { chatId: msg.chatId });
+                break;
+
             default:
-                // Événements inconnus ignorés silencieusement
                 break;
         }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // FALLBACK POLLING REST (si WebSocket indisponible)
+    // FALLBACK POLLING REST
     // ─────────────────────────────────────────────────────────────────────────
     _startFallbackPolling() {
         if (this._pollTimer) return;
@@ -181,7 +190,7 @@ class WhatsAppIntegration {
             });
             const data = await res.json();
             if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-            return data; // { success, messageId, status }
+            return data;
         } catch (err) {
             console.error('❌ sendMessage error:', err.message);
             this.emit('error', { message: err.message });
@@ -210,7 +219,7 @@ class WhatsAppIntegration {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // API — ENVOYER UN MÉDIA
+    // API — ENVOYER UN MÉDIA (URL externe)
     // ─────────────────────────────────────────────────────────────────────────
     async sendMedia(to, mediaUrl, options = {}) {
         try {
@@ -236,6 +245,45 @@ class WhatsAppIntegration {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // API — ENVOYER UN FICHIER LOCAL (File/Blob → base64)          ★ NOUVEAU ★
+    // ─────────────────────────────────────────────────────────────────────────
+    /**
+     * @param {string}  to       — JID ou numéro
+     * @param {File}    file     — objet File du <input type="file">
+     * @param {object}  options  — { caption }
+     */
+    async sendMediaBase64(to, file, options = {}) {
+        try {
+            // Lire le fichier en base64
+            const base64 = await new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload  = () => resolve(reader.result.split(',')[1]);
+                reader.onerror = () => reject(new Error('Lecture fichier échouée'));
+                reader.readAsDataURL(file);
+            });
+
+            const res = await fetch(`${this.baseUrl}/api/whatsapp/send-media-base64`, {
+                method:  'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body:    JSON.stringify({
+                    to,
+                    base64,
+                    mimetype: file.type || 'application/octet-stream',
+                    filename: file.name || 'fichier',
+                    caption:  options.caption || '',
+                }),
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+            return data;
+        } catch (err) {
+            console.error('❌ sendMediaBase64 error:', err.message);
+            this.emit('error', { message: err.message });
+            return { success: false, error: err.message };
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // API — RÉCUPÉRER LES CHATS
     // ─────────────────────────────────────────────────────────────────────────
     async getChats() {
@@ -243,7 +291,7 @@ class WhatsAppIntegration {
             const res  = await fetch(`${this.baseUrl}/api/whatsapp/chats`);
             const data = await res.json();
             if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-            return data; // { success, chats, total }
+            return data;
         } catch (err) {
             console.error('❌ getChats error:', err.message);
             return { success: false, chats: [], error: err.message };
@@ -258,24 +306,23 @@ class WhatsAppIntegration {
             const res  = await fetch(`${this.baseUrl}/api/whatsapp/groups`);
             const data = await res.json();
             if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-            return data; // { success, groups, total }
+            return data;
         } catch (err) {
             console.error('❌ getGroups error:', err.message);
             return { success: false, groups: [], error: err.message };
         }
     }
 
-
     // ─────────────────────────────────────────────────────────────────────────
-    // API — RÉCUPÉRER LES MESSAGES RÉCENTS OU D'UNE CONVERSATION
+    // API — RÉCUPÉRER LES MESSAGES
     // ─────────────────────────────────────────────────────────────────────────
     async getMessages(chatId = '') {
         try {
-            const qs = chatId ? `?chatId=${encodeURIComponent(chatId)}` : '';
+            const qs   = chatId ? `?chatId=${encodeURIComponent(chatId)}` : '';
             const res  = await fetch(`${this.baseUrl}/api/whatsapp/messages${qs}`);
             const data = await res.json();
             if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-            return data; // { success, messages, total }
+            return data;
         } catch (err) {
             console.error('❌ getMessages error:', err.message);
             return { success: false, messages: [], error: err.message };
@@ -283,14 +330,14 @@ class WhatsAppIntegration {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // API — PHOTO DE PROFIL CONTACT / GROUPE
+    // API — PHOTO DE PROFIL
     // ─────────────────────────────────────────────────────────────────────────
     async getProfilePicture(jid) {
         try {
             const res  = await fetch(`${this.baseUrl}/api/whatsapp/profile-picture/${encodeURIComponent(jid)}`);
             const data = await res.json();
             if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-            return data; // { success, url }
+            return data;
         } catch (err) {
             console.warn('⚠️ profile picture indisponible:', err.message);
             return { success: false, url: '', error: err.message };
@@ -305,7 +352,7 @@ class WhatsAppIntegration {
             const res  = await fetch(`${this.baseUrl}/api/whatsapp/media/${encodeURIComponent(messageId)}`);
             const data = await res.json();
             if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-            return data; // { success, data/base64, mimetype }
+            return data;
         } catch (err) {
             console.error('❌ getMedia error:', err.message);
             return { success: false, error: err.message };
@@ -320,10 +367,28 @@ class WhatsAppIntegration {
             const res  = await fetch(`${this.baseUrl}/api/whatsapp/contacts`);
             const data = await res.json();
             if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-            return data; // { success, contacts, total }
+            return data;
         } catch (err) {
             console.error('❌ getContacts error:', err.message);
             return { success: false, contacts: [], error: err.message };
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // API — SUPPRIMER UNE CONVERSATION                              ★ NOUVEAU ★
+    // ─────────────────────────────────────────────────────────────────────────
+    async deleteChat(chatId) {
+        try {
+            const res  = await fetch(`${this.baseUrl}/api/whatsapp/chat/${encodeURIComponent(chatId)}`, {
+                method: 'DELETE',
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+            return data;
+        } catch (err) {
+            console.error('❌ deleteChat error:', err.message);
+            this.emit('error', { message: err.message });
+            return { success: false, error: err.message };
         }
     }
 
@@ -346,7 +411,7 @@ class WhatsAppIntegration {
     on(event, callback) {
         if (!this.listeners[event]) this.listeners[event] = [];
         this.listeners[event].push(callback);
-        return this; // chainable
+        return this;
     }
 
     off(event, callback) {
