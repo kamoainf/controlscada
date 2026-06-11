@@ -68,12 +68,22 @@ function jidToNumber(jid) {
     return String(jid || '').replace('@s.whatsapp.net', '').replace('@g.us', '').split(':')[0];
 }
 
+function isNumericContactName(value) {
+    return /^\+?\d{8,16}$/.test(String(value || '').replace(/\s/g, ''));
+}
+
+function bestNameFromContact(contact = {}) {
+    return [contact.name, contact.notify, contact.verifiedName, contact.pushName, contact.shortName]
+        .find(v => v && !String(v).includes('@') && !isNumericContactName(v)) || '';
+}
+
 function getBestContactName(jid, fallback = '') {
     const id = String(jid || '');
     const num = jidToNumber(id);
     const contact = cachedContacts.find(c => c.id === id || c.jid === id || jidToNumber(c.id || c.jid) === num);
-    const name = contact && (contact.name || contact.notify || contact.verifiedName || contact.pushName || contact.shortName);
-    return name || fallback || num || id;
+    const name = contact && bestNameFromContact(contact);
+    const cleanFallback = fallback && !isNumericContactName(fallback) && !String(fallback).includes('@') ? fallback : '';
+    return name || cleanFallback || (num ? '+' + num : id);
 }
 
 function getDisplayName(jid, fallback = '') {
@@ -395,10 +405,13 @@ async function initWhatsApp() {
                 const id = contact.id || contact.jid;
                 if (!id || isIgnorableChatId(id)) return;
                 const idx = cachedContacts.findIndex(c => (c.id || c.jid) === id);
+                const existing = idx >= 0 ? cachedContacts[idx] : {};
+                const incomingName = bestNameFromContact(contact);
+                const existingName = bestNameFromContact(existing);
                 const normalized = {
                     id,
                     jid: id,
-                    name: contact.name || contact.notify || contact.verifiedName || contact.pushName || contact.shortName || jidToNumber(id),
+                    name: incomingName || existingName || existing.name || ('+' + jidToNumber(id)),
                     notify: contact.notify || '',
                     verifiedName: contact.verifiedName || '',
                     pushName: contact.pushName || '',
