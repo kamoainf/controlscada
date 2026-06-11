@@ -2374,6 +2374,10 @@
         .waw-chat-list::-webkit-scrollbar-thumb{background:#3b4a54;border-radius:2px}
         .waw-ci{display:flex;align-items:center;gap:12px;padding:10px 16px;cursor:pointer;border-bottom:1px solid rgba(42,57,66,.5);transition:background .1s;position:relative}
         .waw-ci:hover,.waw-ci.active{background:#2a3942}
+        .waw-ci-pin-btn{position:absolute;right:8px;bottom:8px;width:22px;height:22px;border-radius:50%;border:0;background:transparent;color:#667781;cursor:pointer;font-size:10px;display:none;align-items:center;justify-content:center}
+        .waw-ci:hover .waw-ci-pin-btn,.waw-ci.pinned .waw-ci-pin-btn{display:flex}
+        .waw-ci-pin-btn:hover{background:#202c33;color:#25D366}
+        .waw-ci.pinned .waw-ci-pin-btn{color:#25D366}
         .waw-ci-av{width:46px;height:46px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0;background:#202c33}
         .waw-ci-body{flex:1;min-width:0}
         .waw-ci-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:2px}
@@ -5521,18 +5525,24 @@
         }
         // Append/merge new messages (dedup by id)
         function waDB_mergeMsgs(chatId, newMsgs){
+            if (wawIsIgnorableChatId(chatId)) return 0;
             var existing = waDB_loadMsgs(chatId);
             var ids = {};
             existing.forEach(function(m){ ids[m.id] = true; });
             var added = 0;
+            function applyReaction(m){
+                var target = existing.find(function(x){ return x.id === m.reactionTo || x.serverId === m.reactionTo; });
+                if (target) {
+                    if (!target.reactions) target.reactions = [];
+                    target.reactions = target.reactions.filter(function(r){ return r.from !== (m.from || m.participant || ''); });
+                    if (m.reactionText) target.reactions.push({ emoji:m.reactionText, from:m.from || m.participant || '', ts:m.ts || Date.now()/1000 });
+                    return true;
+                }
+                return false;
+            }
             newMsgs.forEach(function(m){
                 if (m.isReaction && m.reactionTo) {
-                    var target = existing.find(function(x){ return x.id === m.reactionTo || x.serverId === m.reactionTo; });
-                    if (target) {
-                        if (!target.reactions) target.reactions = [];
-                        target.reactions = target.reactions.filter(function(r){ return r.from !== (m.from || m.participant || ''); });
-                        if (m.reactionText) target.reactions.push({ emoji:m.reactionText, from:m.from || m.participant || '', ts:m.ts || Date.now()/1000 });
-                    }
+                    if (!applyReaction(m)) wawPendingReactions.push(Object.assign({ chatId: chatId }, m));
                     return;
                 }
                 var match = existing.find(function(x){
@@ -5551,6 +5561,10 @@
                 } else if (!ids[m.id]) {
                     existing.push(m); ids[m.id] = true; added++;
                 }
+            });
+            wawPendingReactions = wawPendingReactions.filter(function(r){
+                if (r.chatId !== chatId) return true;
+                return !applyReaction(r);
             });
             // Sort by timestamp
             existing.sort(function(a,b){ return (a.ts||0) - (b.ts||0); });
@@ -5629,6 +5643,7 @@
         var wawReplyTo        = null;
         var wawPickerMode     = 'new';
         var wawPickerMsgId    = '';
+        var wawPendingReactions = [];
 
         function waEscapeHtml(v){
             return String(v||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;');
@@ -5649,7 +5664,12 @@
         function wawIsPlaceholderChat(c){
             return /^g[1-5]$/.test(String(c.id || '')) && /^\+24300000000[1-5]$/.test(String(c.phone || ''));
         }
+        function wawIsIgnorableChatId(cid){
+            cid = String(cid || '');
+            return !cid || cid === 'status@broadcast' || cid.indexOf('@broadcast') !== -1 || cid.indexOf('newsletter') !== -1;
+        }
         function wawPrunePlaceholderChats(chats){
+            chats = (chats || []).filter(function(c){ return !wawIsIgnorableChatId(c.umId || c.phone || c.id); });
             var hasReal = chats.some(function(c){
                 var cid = c.umId || c.phone || c.id || '';
                 return !wawIsPlaceholderChat(c) && (String(cid).indexOf('@') !== -1 || String(cid).replace(/\D/g,'').length >= 8);
@@ -5667,6 +5687,26 @@
             if (mt === 'document') return '📄 Document';
             if (m.hasMedia) return '📎 Média';
             return 'Aucun message';
+        }
+        function wawContactNameByJid(jid){
+            var num = waJidToNum(jid);
+            var chats = waDB_loadChats();
+            var found = chats.find(function(c){
+                var cid = c.umId || c.phone || c.id || '';
+                return cid === jid || waJidToNum(cid) === num || String(c.phone || '').replace(/\D/g,'') === num;
+            });
+            var name = found && found.name && found.name.indexOf('@') === -1 ? found.name : '';
+            return name || (num ? '+' + num : jid);
+        }
+        function wawFormatMessageText(raw, mentionedJid){
+            var text = String(raw || '');
+            (mentionedJid || []).forEach(function(jid){
+                var num = waJidToNum(jid);
+                if (!num) return;
+                var name = '@' + wawContactNameByJid(jid).replace(/^\+/, '');
+                text = text.replace(new RegExp('@?' + num.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'), 'g'), name);
+            });
+            return waEscapeHtml(text).replace(/\n/g,'<br>');
         }
         function waUpsertChat(dbChats, raw){
             var cid = raw.id || raw.jid || raw.chatId || raw.from || raw.umId || raw.phone;
@@ -5911,6 +5951,7 @@
                 quotedMessageId:data.quotedMessageId || '',
                 quotedText:data.quotedText || '',
                 quotedParticipant:data.quotedParticipant || '',
+                mentionedJid:data.mentionedJid || [],
                 isReaction:!!data.isReaction,
                 reactionTo:data.reactionTo || '',
                 reactionText:data.reactionText || ''
@@ -6164,7 +6205,9 @@
                     +'<div class="waw-ci-bottom">'
                     +'<span class="waw-ci-preview">'+previewText.replace(/&/g,'&amp;').replace(/</g,'&lt;')+'</span>'
                     +(c.unread?'<span class="waw-ci-badge">'+c.unread+'</span>':'')
-                    +'</div></div></div>';
+                    +'</div></div>'
+                    +'<button class="waw-ci-pin-btn" title="'+(c.pinned?'Désépingler':'Épingler')+'" onclick="event.stopPropagation();wawTogglePin(\''+waJsArg(c.id)+'\')"><i class="fas fa-thumbtack"></i></button>'
+                    +'</div>';
             }).join('');
         }
         function wawSetFilter(f, el){
@@ -6174,6 +6217,19 @@
             wawRenderChatList();
         }
         function wawFilterChats(q){ wawSearchQ = q; wawRenderChatList(); }
+        function wawTogglePin(chatId){
+            var chats = waDB_loadChats();
+            var c = chats.find(function(x){ return (x.umId||x.phone||x.id) === chatId; });
+            if (c) {
+                c.pinned = !c.pinned;
+            } else {
+                c = { id:'pin_'+Date.now(), umId:chatId, phone:waJidToNum(chatId), name:chatId, isGroup:chatId.indexOf('@g.us') !== -1, pinned:true };
+                chats.push(c);
+            }
+            waDB_saveChats(chats);
+            wawBuildAllChats(); wawRenderChatList();
+            toast(c.pinned ? 'Conversation épinglée' : 'Conversation désépinglée', '#25D366');
+        }
 
         // ── SELECT CHAT ───────────────────────────────────────────
         function wawSelectChat(chatId){
@@ -6218,6 +6274,19 @@
         // ── RENDER MESSAGES FROM LOCAL DB ─────────────────────────
         function wawRenderMsgsFromDB(){
             var msgs = waDB_loadMsgs(wawActiveChatId);
+            var reactions = msgs.filter(function(m){ return m.isReaction && m.reactionTo; });
+            if (reactions.length) {
+                var normal = msgs.filter(function(m){ return !(m.isReaction && m.reactionTo); });
+                reactions.forEach(function(r){
+                    var target = normal.find(function(x){ return x.id === r.reactionTo || x.serverId === r.reactionTo; });
+                    if (!target) return;
+                    if (!target.reactions) target.reactions = [];
+                    target.reactions = target.reactions.filter(function(x){ return x.from !== (r.from || r.participant || ''); });
+                    if (r.reactionText) target.reactions.push({ emoji:r.reactionText, from:r.from || r.participant || '', ts:r.ts || Date.now()/1000 });
+                });
+                msgs = normal;
+                waDB_saveMsgs(wawActiveChatId, msgs);
+            }
             // Apply message search filter
             if(wawMsgSearchQ){
                 var q = wawMsgSearchQ.toLowerCase();
@@ -6482,7 +6551,7 @@
                 // Remove [media] tag — we'll render the actual media widget instead
                 var isMediaMsg = m.hasMedia || m.mediaData || m.mediaType || rawBody.trim()==='[media]';
                 var cleanBody = rawBody.replace(/^\[media\]$/i,'').trim();
-                var body = cleanBody.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
+                var body = wawFormatMessageText(cleanBody, m.mentionedJid || []);
                 // Highlight search term
                 if(q && body) body = body.replace(new RegExp('('+q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+')','gi'),'<mark style="background:rgba(212,133,58,.5);color:#000;border-radius:2px;padding:0 1px">$1</mark>');
                 var ts   = m.time||(m.ts?new Date(m.ts*1000).toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'}):'');
@@ -6558,6 +6627,7 @@
                             quotedMessageId: m.quotedMessageId || '',
                             quotedText: m.quotedText || '',
                             quotedParticipant: m.quotedParticipant || '',
+                            mentionedJid: m.mentionedJid || [],
                             isReaction: !!m.isReaction,
                             reactionTo: m.reactionTo || '',
                             reactionText: m.reactionText || ''
@@ -6859,6 +6929,7 @@
                     // Format dict: { jid: {body,ts,...} }
                     var summary = data.chats;
                     Object.keys(summary).forEach(function(cid){
+                        if (wawIsIgnorableChatId(cid)) return;
                         var m = summary[cid];
                         var num = waJidToNum(cid);
                         var name = m.chatName || m.name || m.pushName || num;
@@ -6875,6 +6946,7 @@
                     var arr = Array.isArray(data) ? data : (Array.isArray(data.chats) ? data.chats : (Array.isArray(data.messages)?data.messages:[]));
                     arr.forEach(function(m){
                         var cid = m.chatId || m.from || '';
+                        if (wawIsIgnorableChatId(cid)) return;
                         if (!cid) return;
                         var num = waJidToNum(cid);
                         var name = m.chatName || m.name || m.pushName || num;

@@ -164,17 +164,40 @@ function getTextFromMessage(message = {}) {
 }
 
 function getQuotedInfo(message = {}) {
-    const ctx = message.extendedTextMessage?.contextInfo
-        || message.imageMessage?.contextInfo
-        || message.videoMessage?.contextInfo
-        || message.documentMessage?.contextInfo
-        || {};
+    const ctx = getContextInfo(message);
     const quoted = ctx.quotedMessage ? unwrapMessage(ctx.quotedMessage) : null;
     return {
         quotedMessageId: ctx.stanzaId || '',
         quotedParticipant: ctx.participant || '',
         quotedText: quoted ? getTextFromMessage(quoted) : '',
+        mentionedJid: ctx.mentionedJid || [],
     };
+}
+
+function getContextInfo(message = {}) {
+    return message.extendedTextMessage?.contextInfo
+        || message.imageMessage?.contextInfo
+        || message.videoMessage?.contextInfo
+        || message.documentMessage?.contextInfo
+        || message.audioMessage?.contextInfo
+        || {};
+}
+
+function isIgnorableChatId(jid) {
+    const id = String(jid || '');
+    return !id || id === 'status@broadcast' || id.endsWith('@broadcast') || id.includes('newsletter');
+}
+
+function applyReactionToCache(chatId, reaction, senderName, timestamp) {
+    const targetId = reaction?.key?.id || '';
+    if (!targetId) return false;
+    const target = cachedMessages.find(m => m.id === targetId);
+    if (!target) return false;
+    if (!target.reactions) target.reactions = [];
+    const from = reaction.key?.participant || reaction.key?.remoteJid || senderName || '';
+    target.reactions = target.reactions.filter(r => r.from !== from);
+    if (reaction.text) target.reactions.push({ emoji: reaction.text, from, ts: timestamp });
+    return true;
 }
 
 function withTimeout(promise, ms, label = 'operation') {
@@ -325,7 +348,7 @@ async function initWhatsApp() {
         function upsertContacts(list = []) {
             list.forEach(contact => {
                 const id = contact.id || contact.jid;
-                if (!id) return;
+                if (!id || isIgnorableChatId(id)) return;
                 const idx = cachedContacts.findIndex(c => (c.id || c.jid) === id);
                 const normalized = {
                     id,
@@ -350,10 +373,11 @@ async function initWhatsApp() {
         waSocket.ev.on('messages.upsert', ({ messages, type }) => {
             messages.forEach(msg => {
                 if (!msg.message) return;
-                rememberRawMessage(msg);
                 const cleanMessage = unwrapMessage(msg.message);
                 const msgType   = Object.keys(cleanMessage)[0];
                 const chatId    = msg.key.remoteJid || '';
+                if (isIgnorableChatId(chatId)) return;
+                rememberRawMessage(msg);
                 const msgId     = msg.key.id || '';
                 const fromMe    = msg.key.fromMe || false;
                 const participant = msg.key.participant || '';
@@ -381,10 +405,33 @@ async function initWhatsApp() {
                 if (hasMedia) mediaMessages.set(msgId, msg);
                 const chatName = isGroup ? '' : getBestContactName(chatId, pushName);
                 const senderName = fromMe ? 'me' : (isGroup ? (pushName || getBestContactName(participant, participant || chatId)) : (chatName || pushName || chatId));
+                if (reaction) {
+                    applyReactionToCache(chatId, reaction, senderName, timestamp);
+                    const reactionObj = {
+                        id: msgId,
+                        chatId,
+                        from: senderName,
+                        fromMe,
+                        timestamp,
+                        pushName: pushName || chatName,
+                        isGroup,
+                        participant,
+                        isReaction: true,
+                        reactionTo: reaction.key?.id || '',
+                        reactionText: reaction.text || '',
+                    };
+                    const chatIdx = cachedChats.findIndex(c => c.id === chatId);
+                    if (chatIdx >= 0) {
+                        cachedChats[chatIdx].lastMessage = senderName + ' a réagi ' + (reaction.text || '');
+                        cachedChats[chatIdx].timestamp = timestamp;
+                    }
+                    broadcast({ type: 'message', data: reactionObj });
+                    return;
+                }
                 const msgObj = { id: msgId, chatId, from: senderName, fromMe, body,
                     timestamp, pushName: pushName || chatName, chatName, isGroup, participant, hasMedia, mediaType, fileName, mimeType,
                     quotedMessageId: quoted.quotedMessageId, quotedParticipant: quoted.quotedParticipant, quotedText: quoted.quotedText,
-                    isReaction: !!reaction, reactionTo: reaction?.key?.id || '', reactionText: reaction?.text || '' };
+                    mentionedJid: getContextInfo(cleanMessage).mentionedJid || [] };
                 rememberCachedMessage(msgObj);
                 const chatIdx = cachedChats.findIndex(c => c.id === chatId);
                 if (chatIdx >= 0) {
@@ -399,6 +446,34 @@ async function initWhatsApp() {
                 }
                 cachedChats.sort((a,b) => (b.timestamp||0)-(a.timestamp||0));
                 broadcast({ type: 'message', data: msgObj });
+            });
+        });
+
+        waSocket.ev.on('messages.update', (updates = []) => {
+            updates.forEach(update => {
+                const chatId = update.key?.remoteJid || '';
+                if (isIgnorableChatId(chatId)) return;
+                const cleanMessage = unwrapMessage(update.update?.message || update.message || {});
+                const reaction = cleanMessage.reactionMessage;
+                if (!reaction) return;
+                const timestamp = Math.floor(Date.now() / 1000);
+                const participant = update.key?.participant || reaction.key?.participant || '';
+                const senderName = update.key?.fromMe ? 'me' : getBestContactName(participant || chatId, participant || chatId);
+                applyReactionToCache(chatId, reaction, senderName, timestamp);
+                broadcast({
+                    type: 'message',
+                    data: {
+                        id: update.key?.id || ('reaction-' + Date.now()),
+                        chatId,
+                        from: senderName,
+                        fromMe: !!update.key?.fromMe,
+                        timestamp,
+                        participant,
+                        isReaction: true,
+                        reactionTo: reaction.key?.id || '',
+                        reactionText: reaction.text || '',
+                    }
+                });
             });
         });
 
@@ -625,7 +700,7 @@ app.get('/api/whatsapp/chats', async (req, res) => {
     try {
         const byId = new Map();
         cachedChats.forEach(c => {
-            if (c && c.id) byId.set(c.id, {
+            if (c && c.id && !isIgnorableChatId(c.id)) byId.set(c.id, {
                 id: c.id,
                 name: c.name || getBestContactName(c.id, c.pushName || c.id),
                 isGroup: !!c.isGroup || String(c.id).endsWith('@g.us'),
@@ -639,7 +714,7 @@ app.get('/api/whatsapp/chats', async (req, res) => {
 
         cachedContacts.forEach(c => {
             const id = c.id || c.jid;
-            if (!id || String(id).endsWith('@broadcast')) return;
+            if (!id || isIgnorableChatId(id)) return;
             const old = byId.get(id) || {};
             byId.set(id, {
                 ...old,
