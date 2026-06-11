@@ -599,6 +599,7 @@
   border: 1px solid #2a3942;
 }
 #waAttachPreview.show { display: flex; }
+#waSendZone.wa-drop-active, #waMsgScroll.wa-drop-active { outline: 2px dashed #25D366; outline-offset: -8px; background: rgba(37,211,102,.07); }
 #waAttachThumb {
   max-width: 56px; max-height: 56px;
   border-radius: 6px; object-fit: cover;
@@ -1432,10 +1433,10 @@ async function waSend() {
 
   try {
     var result;
+    var sentFile = _waAttached;
 
-    if (_waAttached) {
-      result = await _sendFile(_waActiveChatId, _waAttached, { caption: text });
-      waRemoveFile();
+    if (sentFile) {
+      result = await _sendFile(_waActiveChatId, sentFile, { caption: text });
     } else {
       var endpoint = _waActiveIsGroup ? '/whatsapp/send-group' : '/whatsapp/send';
       var body     = _waActiveIsGroup
@@ -1461,8 +1462,12 @@ async function waSend() {
         fromMe: true,
         body: text || '[fichier]',
         timestamp: Math.floor(Date.now() / 1000),
-        hasMedia: !!_waAttached,
+        hasMedia: !!sentFile,
+        mediaType: sentFile ? ((sentFile.type || '').split('/')[0] || 'file') : null,
+        fileName: sentFile ? sentFile.name : null,
+        mimeType: sentFile ? sentFile.type : null,
       };
+      if (sentFile) waRemoveFile();
       _waMessages.push(fake);
       var scroll = document.getElementById('waMsgScroll');
       scroll.appendChild(_buildBubble(fake));
@@ -1494,7 +1499,9 @@ async function _sendFile(to, file, opts) {
             caption: (opts && opts.caption) || '',
           }),
         });
-        resolve(await r.json());
+        var d = await r.json().catch(function(){ return {}; });
+        if (!r.ok || d.success === false) throw new Error(d.error || ('Erreur HTTP ' + r.status));
+        resolve(d);
       } catch(e) { reject(e); }
     };
     reader.onerror = function() { reject(new Error('Lecture échouée')); };
@@ -1506,8 +1513,21 @@ async function _sendFile(to, file, opts) {
    PIÈCE JOINTE
 ═══════════════════════════════════════════════════════════════════ */
 function waHandleFile(input) {
-  var file = input.files[0];
+  var file = input.files && input.files[0];
   if (!file) return;
+  waAttachFile(file);
+  input.value = '';
+}
+
+function waAttachFile(file) {
+  if (!file) return;
+
+  var maxSize = 35 * 1024 * 1024; // base64 + Railway: garder une marge sous 50 MB
+  if (file.size > maxSize) {
+    waToast('❌ Fichier trop lourd. Maximum conseillé: 35 MB', '#e85555');
+    return;
+  }
+
   _waAttached = file;
 
   var preview = document.getElementById('waAttachPreview');
@@ -1516,10 +1536,10 @@ function waHandleFile(input) {
   var name    = document.getElementById('waAttachName');
   var size    = document.getElementById('waAttachSize');
 
-  name.textContent = file.name;
-  size.textContent = _fmtSize(file.size);
+  name.textContent = file.name || 'image-collée.png';
+  size.textContent = _fmtSize(file.size) + ' · prêt à envoyer';
 
-  if (file.type.startsWith('image/')) {
+  if ((file.type || '').startsWith('image/')) {
     var reader = new FileReader();
     reader.onload = function(e) {
       thumb.src = e.target.result;
@@ -1529,21 +1549,21 @@ function waHandleFile(input) {
     reader.readAsDataURL(file);
   } else {
     thumb.style.display = 'none';
+    thumb.src = '';
     icon.style.display  = 'flex';
-    // Icône selon le type
     var iconClass = 'fa-file';
-    if (file.type.startsWith('video/'))       iconClass = 'fa-file-video';
-    else if (file.type.startsWith('audio/'))  iconClass = 'fa-file-audio';
-    else if (file.type.includes('pdf'))       iconClass = 'fa-file-pdf';
-    else if (file.type.includes('word') || file.name.endsWith('.doc') || file.name.endsWith('.docx')) iconClass = 'fa-file-word';
+    if ((file.type || '').startsWith('video/'))       iconClass = 'fa-file-video';
+    else if ((file.type || '').startsWith('audio/'))  iconClass = 'fa-file-audio';
+    else if ((file.type || '').includes('pdf'))       iconClass = 'fa-file-pdf';
+    else if ((file.type || '').includes('word') || (file.name || '').match(/\.docx?$/i)) iconClass = 'fa-file-word';
+    else if ((file.name || '').match(/\.xlsx?$/i)) iconClass = 'fa-file-excel';
     icon.innerHTML = '<i class="fas ' + iconClass + '"></i>';
   }
 
   preview.classList.add('show');
-  input.value = '';
   document.getElementById('waTextInput').focus();
+  waToast('📎 Média ajouté — cliquez Envoyer', '#25D366');
 }
-
 function waRemoveFile() {
   _waAttached = null;
   document.getElementById('waAttachPreview').classList.remove('show');
@@ -1597,11 +1617,62 @@ async function waDoLogout() {
   } catch(e) {}
 }
 
+
+/* ═══════════════════════════════════════════════════════════════════
+   COPIER-COLLER / GLISSER-DÉPOSER MÉDIAS
+═══════════════════════════════════════════════════════════════════ */
+function _waHandlePaste(e) {
+  if (!_waActiveChatId) return;
+  var items = (e.clipboardData && e.clipboardData.items) || [];
+  for (var i = 0; i < items.length; i++) {
+    var it = items[i];
+    if (it.kind === 'file') {
+      var file = it.getAsFile();
+      if (file) {
+        if (!file.name) {
+          var ext = ((file.type || '').split('/')[1] || 'png').replace('jpeg', 'jpg');
+          file = new File([file], 'media-colle-' + Date.now() + '.' + ext, { type: file.type || 'image/png' });
+        }
+        e.preventDefault();
+        waAttachFile(file);
+        return;
+      }
+    }
+  }
+}
+
+function _waHandleDrop(e) {
+  if (!_waActiveChatId) return;
+  e.preventDefault();
+  e.stopPropagation();
+  document.querySelectorAll('.wa-drop-active').forEach(function(el){ el.classList.remove('wa-drop-active'); });
+  var file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+  if (file) waAttachFile(file);
+}
+
+function _waInstallPasteAndDrop() {
+  var input = document.getElementById('waTextInput');
+  var sendZone = document.getElementById('waSendZone');
+  var msgScroll = document.getElementById('waMsgScroll');
+  if (input) input.addEventListener('paste', _waHandlePaste);
+  document.addEventListener('paste', function(e) {
+    if (document.getElementById('waOverlay').classList.contains('open')) _waHandlePaste(e);
+  });
+  [sendZone, msgScroll].forEach(function(el) {
+    if (!el) return;
+    el.addEventListener('dragover', function(e) { e.preventDefault(); el.classList.add('wa-drop-active'); });
+    el.addEventListener('dragleave', function() { el.classList.remove('wa-drop-active'); });
+    el.addEventListener('drop', _waHandleDrop);
+  });
+}
+_waInstallPasteAndDrop();
+
 /* ═══════════════════════════════════════════════════════════════════
    WEBSOCKET TEMPS RÉEL (HUB)
 ═══════════════════════════════════════════════════════════════════ */
 (function _waConnectHub() {
   try {
+    if (_hubWs && (_hubWs.readyState === WebSocket.OPEN || _hubWs.readyState === WebSocket.CONNECTING)) return;
     _hubWs = new WebSocket(WA_WS);
     _hubWs.onopen  = function() { console.log('🔌 Hub WS OK'); };
     _hubWs.onmessage = function(ev) {
@@ -1620,7 +1691,7 @@ async function waDoLogout() {
       } catch(_) {}
     };
     _hubWs.onerror  = function() {};
-    _hubWs.onclose  = function() { setTimeout(_waConnectHub, 8000); };
+    _hubWs.onclose  = function() { _hubWs = null; setTimeout(_waConnectHub, 8000); };
   } catch(_) { setTimeout(_waConnectHub, 8000); }
 })();
 
