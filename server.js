@@ -40,6 +40,7 @@ let waStarting = false;
 let cachedChats    = [];
 let cachedMessages = [];
 let cachedContacts = [];
+const groupNames = new Map();
 const rawMessages = new Map();
 const mediaMessages = new Map();
 
@@ -93,7 +94,9 @@ async function hydrateChat(chat) {
             const meta = await waSocket.groupMetadata(id);
             name = meta.subject || name || id;
             participants = meta.participants?.length || participants;
+            if (meta.subject) groupNames.set(id, meta.subject);
         } catch (_) {}
+        name = groupNames.get(id) || name || id;
     } else {
         name = getBestContactName(id, name);
     }
@@ -139,6 +142,39 @@ function buildMessageKey(messageId, chatId, fallbackFromMe = false) {
     };
     if (cached?.participant) key.participant = cached.participant;
     return key;
+}
+
+function unwrapMessage(message = {}) {
+    if (message.ephemeralMessage?.message) return unwrapMessage(message.ephemeralMessage.message);
+    if (message.viewOnceMessage?.message) return unwrapMessage(message.viewOnceMessage.message);
+    if (message.viewOnceMessageV2?.message) return unwrapMessage(message.viewOnceMessageV2.message);
+    if (message.documentWithCaptionMessage?.message) return unwrapMessage(message.documentWithCaptionMessage.message);
+    return message;
+}
+
+function getTextFromMessage(message = {}) {
+    return message.conversation
+        || message.extendedTextMessage?.text
+        || message.imageMessage?.caption
+        || message.videoMessage?.caption
+        || message.documentMessage?.caption
+        || message.buttonsResponseMessage?.selectedDisplayText
+        || message.listResponseMessage?.title
+        || '';
+}
+
+function getQuotedInfo(message = {}) {
+    const ctx = message.extendedTextMessage?.contextInfo
+        || message.imageMessage?.contextInfo
+        || message.videoMessage?.contextInfo
+        || message.documentMessage?.contextInfo
+        || {};
+    const quoted = ctx.quotedMessage ? unwrapMessage(ctx.quotedMessage) : null;
+    return {
+        quotedMessageId: ctx.stanzaId || '',
+        quotedParticipant: ctx.participant || '',
+        quotedText: quoted ? getTextFromMessage(quoted) : '',
+    };
 }
 
 function withTimeout(promise, ms, label = 'operation') {
@@ -264,7 +300,10 @@ async function initWhatsApp() {
         waSocket.ev.on('chats.upsert', (newChats) => {
             newChats.forEach(chat => {
                 const idx = cachedChats.findIndex(c => c.id === chat.id);
-                const chatObj = { id: chat.id, name: chat.name || chat.id, isGroup: chat.id.endsWith('@g.us'),
+                const isGroup = chat.id.endsWith('@g.us');
+                if (isGroup && chat.name) groupNames.set(chat.id, chat.name);
+                const old = idx >= 0 ? cachedChats[idx] : {};
+                const chatObj = { id: chat.id, name: isGroup ? (chat.name || old.name || chat.id) : (chat.name || old.name || chat.id), isGroup,
                     unreadCount: chat.unreadCount || 0, timestamp: chat.conversationTimestamp || Math.floor(Date.now()/1000), lastMessage: '', picture: null };
                 if (idx >= 0) cachedChats[idx] = { ...cachedChats[idx], ...chatObj };
                 else cachedChats.push(chatObj);
@@ -312,7 +351,8 @@ async function initWhatsApp() {
             messages.forEach(msg => {
                 if (!msg.message) return;
                 rememberRawMessage(msg);
-                const msgType   = Object.keys(msg.message)[0];
+                const cleanMessage = unwrapMessage(msg.message);
+                const msgType   = Object.keys(cleanMessage)[0];
                 const chatId    = msg.key.remoteJid || '';
                 const msgId     = msg.key.id || '';
                 const fromMe    = msg.key.fromMe || false;
@@ -320,29 +360,40 @@ async function initWhatsApp() {
                 const timestamp = Number(msg.messageTimestamp) || Math.floor(Date.now()/1000);
                 const pushName  = msg.pushName || '';
                 const isGroup   = chatId.endsWith('@g.us');
-                const body = msg.message?.conversation || msg.message?.extendedTextMessage?.text
-                    || msg.message?.imageMessage?.caption || msg.message?.videoMessage?.caption
-                    || msg.message?.documentMessage?.caption || '';
+                if (isGroup && groupNames.has(chatId) === false) {
+                    const existingGroup = cachedChats.find(c => c.id === chatId && c.name && c.name !== pushName);
+                    if (existingGroup?.name) groupNames.set(chatId, existingGroup.name);
+                }
+                const body = getTextFromMessage(cleanMessage);
                 const mediaTypes = ['imageMessage','videoMessage','audioMessage','documentMessage','stickerMessage','pttMessage'];
                 const hasMedia   = mediaTypes.includes(msgType);
                 const mediaType  = hasMedia ? msgType.replace('Message','') : null;
-                const fileName   = msg.message?.documentMessage?.fileName || null;
-                const mimeType   = msg.message?.[msgType]?.mimetype || null;
+                const fileName   = cleanMessage?.documentMessage?.fileName || null;
+                const mimeType   = cleanMessage?.[msgType]?.mimetype || null;
+                const quoted = getQuotedInfo(cleanMessage);
+                const reaction = cleanMessage.reactionMessage || null;
                 if (!isGroup && pushName) {
                     upsertContacts([{ id: chatId, name: pushName, pushName }]);
                 }
+                if (isGroup && participant && pushName) {
+                    upsertContacts([{ id: participant, name: pushName, pushName }]);
+                }
                 if (hasMedia) mediaMessages.set(msgId, msg);
                 const chatName = isGroup ? '' : getBestContactName(chatId, pushName);
-                const msgObj = { id: msgId, chatId, from: fromMe ? 'me' : chatId, fromMe, body,
-                    timestamp, pushName: pushName || chatName, chatName, isGroup, participant, hasMedia, mediaType, fileName, mimeType };
+                const senderName = fromMe ? 'me' : (isGroup ? (pushName || getBestContactName(participant, participant || chatId)) : (chatName || pushName || chatId));
+                const msgObj = { id: msgId, chatId, from: senderName, fromMe, body,
+                    timestamp, pushName: pushName || chatName, chatName, isGroup, participant, hasMedia, mediaType, fileName, mimeType,
+                    quotedMessageId: quoted.quotedMessageId, quotedParticipant: quoted.quotedParticipant, quotedText: quoted.quotedText,
+                    isReaction: !!reaction, reactionTo: reaction?.key?.id || '', reactionText: reaction?.text || '' };
                 rememberCachedMessage(msgObj);
                 const chatIdx = cachedChats.findIndex(c => c.id === chatId);
                 if (chatIdx >= 0) {
-                    cachedChats[chatIdx].lastMessage = body || (hasMedia ? '['+mediaType+']' : '');
+                    cachedChats[chatIdx].lastMessage = reaction ? (senderName + ' a réagi ' + reaction.text) : (body || (hasMedia ? '['+mediaType+']' : ''));
                     cachedChats[chatIdx].timestamp   = timestamp;
+                    if (isGroup) cachedChats[chatIdx].name = groupNames.get(chatId) || cachedChats[chatIdx].name || chatId;
                     if (!fromMe) cachedChats[chatIdx].unreadCount = (cachedChats[chatIdx].unreadCount||0)+1;
                 } else {
-                    cachedChats.unshift({ id: chatId, name: chatName || pushName || chatId, isGroup,
+                    cachedChats.unshift({ id: chatId, name: isGroup ? (groupNames.get(chatId) || chatId) : (chatName || pushName || chatId), isGroup,
                         unreadCount: fromMe ? 0 : 1, timestamp,
                         lastMessage: body || (hasMedia ? '['+mediaType+']' : ''), picture: null });
                 }
@@ -608,6 +659,7 @@ app.get('/api/whatsapp/chats', async (req, res) => {
         try {
             const groups = await waSocket.groupFetchAllParticipating();
             Object.entries(groups || {}).forEach(([id, g]) => {
+                if (g.subject) groupNames.set(id, g.subject);
                 const old = byId.get(id) || {};
                 byId.set(id, {
                     ...old,
@@ -638,6 +690,17 @@ app.get('/api/whatsapp/chats', async (req, res) => {
 app.get('/api/whatsapp/contacts', async (req, res) => {
     if (!waConnected || !waSocket) return res.status(503).json({ error: 'WhatsApp non connecté', status: waStatus });
     try {
+        try {
+            const groups = await waSocket.groupFetchAllParticipating();
+            Object.values(groups || {}).forEach(g => {
+                (g.participants || []).forEach(p => {
+                    const jid = p.id || p.jid;
+                    if (!jid || String(jid).endsWith('@g.us')) return;
+                    const known = cachedContacts.find(c => (c.id || c.jid) === jid);
+                    if (!known) cachedContacts.push({ id: jid, jid, name: jidToNumber(jid), phone: jidToNumber(jid), isGroup: false });
+                });
+            });
+        } catch (_) {}
         const contacts = [];
         for (const contact of cachedContacts) {
             const id = contact.id || contact.jid;
@@ -665,6 +728,14 @@ app.get('/api/whatsapp/groups', async (req, res) => {
         const groups = await waSocket.groupFetchAllParticipating();
         const out = [];
         for (const [id, g] of Object.entries(groups || {})) {
+            if (g.subject) groupNames.set(id, g.subject);
+            (g.participants || []).forEach(p => {
+                const jid = p.id || p.jid;
+                if (jid) {
+                    const known = cachedContacts.find(c => (c.id || c.jid) === jid);
+                    if (!known) cachedContacts.push({ id: jid, jid, name: jidToNumber(jid), phone: jidToNumber(jid), isGroup: false });
+                }
+            });
             const picture = await getProfilePictureSafe(id);
             out.push({
                 id,

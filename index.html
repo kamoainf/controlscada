@@ -2385,6 +2385,25 @@
         .waw-load-bar{padding:8px 10px;border-top:1px solid #2a3942;background:#202c33;display:flex;gap:6px;flex-shrink:0}
         .waw-load-btn{flex:1;padding:7px;background:rgba(37,211,102,.1);border:1px solid rgba(37,211,102,.35);border-radius:8px;color:#25D366;font-size:10px;cursor:pointer;font-family:var(--mono);display:flex;align-items:center;justify-content:center;gap:5px}
         .waw-load-btn:hover{background:rgba(37,211,102,.2)}
+        .waw-picker{position:fixed;inset:0;background:rgba(0,0,0,.62);z-index:16000;display:none;align-items:center;justify-content:center;padding:18px}
+        .waw-picker.on{display:flex}
+        .waw-picker-box{width:min(420px,calc(100vw - 34px));max-height:min(620px,calc(100vh - 42px));background:#111b21;border:1px solid #2a3942;border-radius:14px;box-shadow:0 24px 80px rgba(0,0,0,.75);display:flex;flex-direction:column;overflow:hidden}
+        .waw-picker-head{background:#202c33;padding:12px 14px;display:flex;align-items:center;gap:10px;border-bottom:1px solid #2a3942}
+        .waw-picker-title{font-size:14px;font-weight:700;color:#e9edef;flex:1}
+        .waw-picker-close{width:30px;height:30px;border-radius:50%;border:0;background:transparent;color:#aebac1;cursor:pointer}
+        .waw-picker-close:hover{background:#2a3942;color:#e9edef}
+        .waw-picker-search{padding:10px;background:#111b21;border-bottom:1px solid #1a2530}
+        .waw-picker-search input{width:100%;background:#202c33;border:1px solid #2a3942;border-radius:8px;color:#e9edef;padding:9px 11px;outline:none;font-size:13px}
+        .waw-picker-list{overflow-y:auto;min-height:160px}
+        .waw-picker-item{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid rgba(42,57,66,.45);cursor:pointer}
+        .waw-picker-item:hover{background:#182229}
+        .waw-picker-av{width:40px;height:40px;border-radius:50%;background:#202c33;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0;overflow:hidden}
+        .waw-picker-body{flex:1;min-width:0}
+        .waw-picker-name{font-size:13px;color:#e9edef;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        .waw-picker-sub{font-size:10px;color:#8696a0;font-family:var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        .waw-picker-manual{display:flex;gap:8px;padding:10px;background:#202c33;border-top:1px solid #2a3942}
+        .waw-picker-manual input{flex:1;background:#111b21;border:1px solid #2a3942;border-radius:8px;color:#e9edef;padding:8px 10px;outline:none;font-size:12px}
+        .waw-picker-manual button{border:0;border-radius:8px;background:#25D366;color:#111b21;font-weight:700;padding:0 12px;cursor:pointer}
 
         /* RIGHT CONVERSATION */
         .waw-conv{flex:1;display:flex;flex-direction:column;background:#0b141a;overflow:hidden;position:relative}
@@ -2420,9 +2439,14 @@
         .waw-msg-wrap.sent .waw-bubble{background:#005c4b;border-bottom-right-radius:2px;color:#e9edef}
         .waw-msg-wrap.recv .waw-bubble{background:#202c33;border-bottom-left-radius:2px;color:#e9edef}
         .waw-bubble-author{font-size:11px;font-weight:600;color:#25D366;margin-bottom:3px}
+        .waw-quote-box{border-left:3px solid #25D366;background:rgba(255,255,255,.07);border-radius:7px;padding:5px 7px;margin-bottom:5px;max-width:240px}
+        .waw-quote-title{font-size:10px;color:#25D366;font-weight:700;margin-bottom:1px}
+        .waw-quote-text{font-size:11px;color:#cbd5d9;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
         .waw-bubble-meta{display:flex;justify-content:flex-end;align-items:center;gap:4px;margin-top:3px}
         .waw-bubble-time{font-size:10px;color:rgba(233,237,239,.6)}
         .waw-bubble-tick{font-size:11px;color:#53bdeb}
+        .waw-reactions{display:flex;gap:3px;justify-content:flex-end;margin-top:-1px}
+        .waw-reaction-chip{background:#202c33;border:1px solid #2a3942;border-radius:10px;padding:1px 5px;font-size:12px;line-height:16px;box-shadow:0 2px 5px rgba(0,0,0,.25)}
         .waw-date-sep{text-align:center;margin:10px 0;font-size:11px;color:#8696a0;font-family:var(--sans)}
         .waw-date-sep span{background:#1f2c34;padding:4px 12px;border-radius:8px}
         .waw-typing{color:#25D366;font-size:12px;padding:8px 12px;font-family:var(--sans)}
@@ -5502,7 +5526,31 @@
             existing.forEach(function(m){ ids[m.id] = true; });
             var added = 0;
             newMsgs.forEach(function(m){
-                if (!ids[m.id]) { existing.push(m); ids[m.id] = true; added++; }
+                if (m.isReaction && m.reactionTo) {
+                    var target = existing.find(function(x){ return x.id === m.reactionTo || x.serverId === m.reactionTo; });
+                    if (target) {
+                        if (!target.reactions) target.reactions = [];
+                        target.reactions = target.reactions.filter(function(r){ return r.from !== (m.from || m.participant || ''); });
+                        if (m.reactionText) target.reactions.push({ emoji:m.reactionText, from:m.from || m.participant || '', ts:m.ts || Date.now()/1000 });
+                    }
+                    return;
+                }
+                var match = existing.find(function(x){
+                    if (x.id === m.id || x.serverId === m.id || (m.serverId && x.id === m.serverId)) return true;
+                    if (!x.fromMe || !m.fromMe) return false;
+                    if (x.delivered === true && String(x.id || '').indexOf('local_') !== 0) return false;
+                    var sameBody = (x.body || '') === (m.body || '');
+                    var sameMedia = (!!x.hasMedia) === (!!m.hasMedia);
+                    var closeTime = Math.abs((x.ts || 0) - (m.ts || 0)) <= 45;
+                    return sameBody && sameMedia && closeTime;
+                });
+                if (match) {
+                    Object.assign(match, m, { id: match.id, serverId: m.id || match.serverId, delivered: m.delivered !== false });
+                    ids[match.id] = true;
+                    if (match.serverId) ids[match.serverId] = true;
+                } else if (!ids[m.id]) {
+                    existing.push(m); ids[m.id] = true; added++;
+                }
             });
             // Sort by timestamp
             existing.sort(function(a,b){ return (a.ts||0) - (b.ts||0); });
@@ -5579,6 +5627,8 @@
         var wawAllChats       = [];
         var wawAttachedFile   = null;
         var wawReplyTo        = null;
+        var wawPickerMode     = 'new';
+        var wawPickerMsgId    = '';
 
         function waEscapeHtml(v){
             return String(v||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;');
@@ -5596,6 +5646,28 @@
         function waJsArg(v){
             return String(v || '').replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/\n/g,'\\n').replace(/\r/g,'');
         }
+        function wawIsPlaceholderChat(c){
+            return /^g[1-5]$/.test(String(c.id || '')) && /^\+24300000000[1-5]$/.test(String(c.phone || ''));
+        }
+        function wawPrunePlaceholderChats(chats){
+            var hasReal = chats.some(function(c){
+                var cid = c.umId || c.phone || c.id || '';
+                return !wawIsPlaceholderChat(c) && (String(cid).indexOf('@') !== -1 || String(cid).replace(/\D/g,'').length >= 8);
+            });
+            return hasReal ? chats.filter(function(c){ return !wawIsPlaceholderChat(c); }) : chats;
+        }
+        function wawPreviewText(m){
+            if (!m) return 'Aucun message';
+            if (m.isReaction) return 'Réaction ' + (m.reactionText || '');
+            if (m.body && m.body !== '[media]') return m.body;
+            var mt = (m.mediaType || '').toLowerCase();
+            if (mt === 'image') return '📷 Photo';
+            if (mt === 'video') return '🎬 Vidéo';
+            if (mt === 'audio' || mt === 'ptt') return '🎙️ Audio';
+            if (mt === 'document') return '📄 Document';
+            if (m.hasMedia) return '📎 Média';
+            return 'Aucun message';
+        }
         function waUpsertChat(dbChats, raw){
             var cid = raw.id || raw.jid || raw.chatId || raw.from || raw.umId || raw.phone;
             if (!cid) return dbChats;
@@ -5611,7 +5683,11 @@
                 existing.phone = existing.phone || num;
                 existing.isGroup = isGroup;
                 existing.emoji = existing.emoji || (isGroup?'👥':'👤');
-                if (name && (!existing.name || existing.name.indexOf('@') !== -1 || existing.name === existing.phone || existing.name === cid || isGroup)) existing.name = name;
+                if (name && isGroup) {
+                    if (!raw.pushName && !raw.participant && name.indexOf('@') === -1 && name !== num) existing.name = name;
+                } else if (name && (!existing.name || existing.name.indexOf('@') !== -1 || existing.name === existing.phone || existing.name === cid)) {
+                    existing.name = name;
+                }
                 if (pic) { existing.picture = pic; existing.profilePicUrl = pic; }
             }
             return dbChats;
@@ -5623,6 +5699,17 @@
                 if (!r.ok || !d.success) return false;
                 var dbChats = waDB_loadChats();
                 (d.chats || []).forEach(function(c){ dbChats = waUpsertChat(dbChats, c); });
+                try {
+                    var cr = await fetch(RAILWAY_API + '/whatsapp/contacts');
+                    var cd = await cr.json();
+                    if (cr.ok && cd.success) (cd.contacts || []).forEach(function(c){ dbChats = waUpsertChat(dbChats, c); });
+                } catch(_) {}
+                try {
+                    var gr = await fetch(RAILWAY_API + '/whatsapp/groups');
+                    var gd = await gr.json();
+                    if (gr.ok && gd.success) (gd.groups || []).forEach(function(g){ dbChats = waUpsertChat(dbChats, g); });
+                } catch(_) {}
+                dbChats = wawPrunePlaceholderChats(dbChats);
                 waDB_saveChats(dbChats);
                 wawBuildAllChats(); wawRenderChatList(); wawUpdateTotalBadge();
                 return true;
@@ -5794,18 +5881,22 @@
             var chats = waDB_loadChats();
             var existing = chats.find(function(c){ return (c.umId||c.phone||c.id) === chatId || c.phone === num; });
             if (!existing) {
-                chats.push({ id:'ws_'+Date.now(), umId:chatId, phone:num, emoji:isGroup?'👥':'👤', name:displayName, isGroup:isGroup, picture:data.picture||data.profilePicUrl||'' });
+                chats.push({ id:'ws_'+Date.now(), umId:chatId, phone:num, emoji:isGroup?'👥':'👤', name:isGroup ? (data.chatName || data.name || chatId) : displayName, isGroup:isGroup, picture:data.picture||data.profilePicUrl||'' });
                 waDB_saveChats(chats);
             } else {
-                var betterName = data.chatName || data.name || data.pushName;
-                if (betterName && (!existing.name || existing.name === num || existing.name === chatId || existing.name.indexOf('@') !== -1 || isGroup)) existing.name = betterName;
+                var betterName = data.chatName || data.name || (!isGroup ? data.pushName : '');
+                if (isGroup) {
+                    if (betterName && betterName !== data.pushName && betterName.indexOf('@') === -1) existing.name = betterName;
+                } else if (betterName && (!existing.name || existing.name === num || existing.name === chatId || existing.name.indexOf('@') !== -1)) {
+                    existing.name = betterName;
+                }
                 if (data.picture || data.profilePicUrl) { existing.picture = data.picture || data.profilePicUrl; existing.profilePicUrl = existing.picture; }
                 waDB_saveChats(chats);
             }
 
             var entry = {
                 id:       data.id || ('' + ts + chatId),
-                from:     displayName,
+                from:     data.fromMe ? waMyPhone : displayName,
                 body:     data.body || '',
                 fromMe:   !!data.fromMe,
                 ts:       ts,
@@ -5814,7 +5905,15 @@
                 read:     (chatId === wawActiveChatId),
                 delivered:true,
                 hasMedia: !!data.hasMedia,
-                mediaType:data.mediaType || null
+                mediaType:data.mediaType || null,
+                mediaMime:data.mimeType || data.mimetype || null,
+                fileName:data.fileName || null,
+                quotedMessageId:data.quotedMessageId || '',
+                quotedText:data.quotedText || '',
+                quotedParticipant:data.quotedParticipant || '',
+                isReaction:!!data.isReaction,
+                reactionTo:data.reactionTo || '',
+                reactionText:data.reactionText || ''
             };
             waDB_mergeMsgs(chatId, [entry]);
             wawBuildAllChats(); wawRenderChatList(); wawUpdateTotalBadge();
@@ -6008,7 +6107,7 @@
                     id: cid, name: name, emoji: g.emoji||(g.isGroup?'👥':'👤'),
                     picture: g.picture || g.profilePicUrl || g.avatar || '',
                     profilePicUrl: g.profilePicUrl || g.picture || g.avatar || '',
-                    lastMsg: last ? last.body : '',
+                    lastMsg: wawPreviewText(last),
                     lastTime: last ? last.time : '',
                     lastTs: last ? (last.ts||0) : 0,
                     unread: unread,
@@ -6230,7 +6329,7 @@
             var msgs = waDB_loadMsgs(wawActiveChatId);
             var m = msgs.find(function(x){ return x.id === messageId; });
             if (!m) return;
-            wawReplyTo = { id: messageId, from: m.from || '', body: m.body || (m.hasMedia ? '[media]' : '') };
+            wawReplyTo = { id: m.serverId || messageId, localId: messageId, from: m.from || '', body: m.body || (m.hasMedia ? '[media]' : '') };
             document.getElementById('wawReplyTitle').textContent = 'Réponse à ' + (m.fromMe ? 'vous' : (m.from || wawActiveChatName));
             document.getElementById('wawReplyText').textContent = wawReplyTo.body || '[media]';
             document.getElementById('wawReplyPreview').classList.add('on');
@@ -6245,6 +6344,7 @@
             var msgs = waDB_loadMsgs(wawActiveChatId);
             var m = msgs.find(function(x){ return x.id === messageId; });
             if (!m || !m.fromMe) { toast('Seuls vos messages peuvent être modifiés','var(--amber)'); return; }
+            var remoteId = m.serverId || messageId;
             var next = prompt('Modifier le message', m.body || '');
             if (next === null) return;
             next = next.trim();
@@ -6252,7 +6352,7 @@
             fetch(RAILWAY_API+'/whatsapp/edit-message',{
                 method:'POST',
                 headers:{'Content-Type':'application/json'},
-                body:JSON.stringify({chatId:wawActiveChatId, messageId:messageId, message:next})
+                body:JSON.stringify({chatId:wawActiveChatId, messageId:remoteId, message:next})
             }).then(function(r){return r.json();}).then(function(d){
                 if(!d.success){ toast('⚠️ Edition impossible: '+(d.error||''),'var(--amber)'); return; }
                 m.body = next; m.edited = true; waDB_saveMsgs(wawActiveChatId, msgs); wawRenderMsgsFromDB();
@@ -6262,7 +6362,8 @@
             if (!confirm('Supprimer ce message ?')) return;
             var msgs = waDB_loadMsgs(wawActiveChatId);
             var m = msgs.find(function(x){ return x.id === messageId; }) || {};
-            fetch(RAILWAY_API+'/whatsapp/message/'+encodeURIComponent(messageId)+'?chatId='+encodeURIComponent(wawActiveChatId)+'&fromMe='+encodeURIComponent(!!m.fromMe),{
+            var remoteId = m.serverId || messageId;
+            fetch(RAILWAY_API+'/whatsapp/message/'+encodeURIComponent(remoteId)+'?chatId='+encodeURIComponent(wawActiveChatId)+'&fromMe='+encodeURIComponent(!!m.fromMe),{
                 method:'DELETE'
             }).then(function(r){return r.json();}).then(function(d){
                 if(!d.success){ toast('⚠️ Suppression impossible: '+(d.error||''),'var(--amber)'); return; }
@@ -6272,12 +6373,80 @@
             }).catch(function(e){ toast('⚠️ Suppression impossible: '+e.message,'var(--amber)'); });
         }
         function wawForwardMessage(messageId){
-            var dest = prompt('Transférer vers quel contact/groupe ?\nCollez le numéro ou le JID WhatsApp.');
+            var msgs = waDB_loadMsgs(wawActiveChatId);
+            var m = msgs.find(function(x){ return x.id === messageId; }) || {};
+            wawOpenRecipientPicker('forward', m.serverId || messageId);
+        }
+        function wawNewChat(){
+            wawOpenRecipientPicker('new', '');
+        }
+        function wawOpenRecipientPicker(mode, messageId){
+            wawPickerMode = mode || 'new';
+            wawPickerMsgId = messageId || '';
+            wawBuildRecipientPicker('');
+            var title = document.getElementById('wawPickerTitle');
+            if (title) title.textContent = wawPickerMode === 'forward' ? 'Transférer à...' : 'Nouveau message';
+            var p = document.getElementById('wawPicker');
+            if (p) p.classList.add('on');
+            setTimeout(function(){ var inp = document.getElementById('wawPickerSearch'); if (inp) { inp.value=''; inp.focus(); } }, 50);
+        }
+        function wawCloseRecipientPicker(){
+            var p = document.getElementById('wawPicker');
+            if (p) p.classList.remove('on');
+            wawPickerMode = 'new';
+            wawPickerMsgId = '';
+        }
+        function wawBuildRecipientPicker(q){
+            var list = document.getElementById('wawPickerList');
+            if (!list) return;
+            q = (q || '').toLowerCase().trim();
+            wawBuildAllChats();
+            var items = wawAllChats.filter(function(c){
+                if (c.id === wawActiveChatId && wawPickerMode === 'forward') return true;
+                if (!q) return true;
+                return (c.name || '').toLowerCase().indexOf(q) !== -1 || (c.id || '').toLowerCase().indexOf(q) !== -1 || (c.phone || '').toLowerCase().indexOf(q) !== -1;
+            }).slice(0, 80);
+            if (!items.length) {
+                list.innerHTML = '<div class="waw-empty" style="padding:24px">Aucun contact</div>';
+                return;
+            }
+            list.innerHTML = items.map(function(c){
+                return '<div class="waw-picker-item" onclick="wawPickRecipient(\''+waJsArg(c.id)+'\')">'
+                    +'<div class="waw-picker-av">'+waAvatarHtml(c,c.emoji)+'</div>'
+                    +'<div class="waw-picker-body">'
+                    +'<div class="waw-picker-name">'+waEscapeHtml(c.name || c.id)+'</div>'
+                    +'<div class="waw-picker-sub">'+waEscapeHtml(c.isGroup ? 'Groupe' : (c.phone || c.id))+'</div>'
+                    +'</div></div>';
+            }).join('');
+        }
+        function wawPickManualRecipient(){
+            var inp = document.getElementById('wawPickerManual');
+            var val = inp ? inp.value.trim() : '';
+            if (!val) return;
+            wawPickRecipient(val);
+            if (inp) inp.value = '';
+        }
+        function wawPickRecipient(dest){
             if (!dest) return;
+            if (wawPickerMode === 'forward') {
+                wawDoForwardMessage(wawPickerMsgId, dest);
+                wawCloseRecipientPicker();
+                return;
+            }
+            var dbChats = waDB_loadChats();
+            var normalized = dest.indexOf('@') !== -1 ? dest : dest.replace(/\D/g,'') + '@s.whatsapp.net';
+            dbChats = waUpsertChat(dbChats, { id: normalized, name: dest, isGroup: normalized.indexOf('@g.us') !== -1 });
+            dbChats = wawPrunePlaceholderChats(dbChats);
+            waDB_saveChats(dbChats);
+            wawBuildAllChats(); wawRenderChatList();
+            wawCloseRecipientPicker();
+            wawSelectChat(normalized);
+        }
+        function wawDoForwardMessage(messageId, dest){
             fetch(RAILWAY_API+'/whatsapp/forward-message',{
                 method:'POST',
                 headers:{'Content-Type':'application/json'},
-                body:JSON.stringify({to:dest.trim(), messageId:messageId})
+                body:JSON.stringify({to:dest.trim ? dest.trim() : dest, messageId:messageId})
             }).then(function(r){return r.json();}).then(function(d){
                 if(d.success) toast('✅ Message transféré','#25D366');
                 else toast('⚠️ Transfert impossible: '+(d.error||''),'var(--amber)');
@@ -6324,6 +6493,19 @@
                 var tick = isSent ? '<span class="waw-bubble-tick" style="color:'+(m.delivered?'#53bdeb':'#8696a0')+'">'+(m.delivered?'✓✓':'✓')+'</span>' : '';
                 var mediaHtml = isMediaMsg ? wawRenderMediaContent(m) : '';
                 var edited = m.edited ? '<span style="font-size:9px;color:rgba(233,237,239,.45);margin-right:4px">modifié</span>' : '';
+                var quoteText = m.quotedText || '';
+                if (!quoteText && m.quotedMessageId) {
+                    var qm = waDB_loadMsgs(wawActiveChatId).find(function(x){ return x.id === m.quotedMessageId || x.serverId === m.quotedMessageId; });
+                    quoteText = qm ? (qm.body || (qm.hasMedia ? '[media]' : '')) : '';
+                }
+                var quoteHtml = m.quotedMessageId ? '<div class="waw-quote-box">'
+                    +'<div class="waw-quote-title">'+waEscapeHtml(m.quotedParticipant ? waJidToNum(m.quotedParticipant) : 'Message cité')+'</div>'
+                    +'<div class="waw-quote-text">'+waEscapeHtml(quoteText || 'Message non chargé')+'</div>'
+                    +'</div>' : '';
+                var reactions = (m.reactions || []).filter(function(r){ return r.emoji; });
+                var reactionsHtml = reactions.length ? '<div class="waw-reactions">'+reactions.map(function(r){
+                    return '<span class="waw-reaction-chip" title="'+waEscapeHtml(r.from || '')+'">'+waEscapeHtml(r.emoji)+'</span>';
+                }).join('')+'</div>' : '';
                 var actions = '<div class="waw-msg-actions">'
                     +'<button class="waw-msg-act" title="Répondre" onclick="event.stopPropagation();wawStartReply(\''+waJsArg(m.id)+'\')"><i class="fas fa-reply"></i></button>'
                     +'<button class="waw-msg-act" title="Transférer" onclick="event.stopPropagation();wawForwardMessage(\''+waJsArg(m.id)+'\')"><i class="fas fa-share"></i></button>'
@@ -6332,10 +6514,10 @@
                     +'</div>';
                 var textHtml = body ? '<div class="waw-bubble-text">'+body+'</div>' : '';
                 return sep+'<div class="waw-msg-wrap '+(isSent?'sent':'recv')+'" data-mid="'+m.id+'">'
-                    +'<div class="waw-bubble">'+actions+author+mediaHtml+textHtml
+                    +'<div class="waw-bubble">'+actions+author+quoteHtml+mediaHtml+textHtml
                     +'<div class="waw-bubble-meta">'
                     +edited+'<span class="waw-bubble-time">'+ts+'</span>'+tick
-                    +'</div></div></div>';
+                    +'</div>'+reactionsHtml+'</div></div>';
             }).join('');
             c.innerHTML = html;
             // Scroll to bottom (or to first search result)
@@ -6372,7 +6554,13 @@
                             mediaMime: m.mimetype || m.mime || null,
                             mediaData: m.mediaData || m.base64 || null,
                             caption: m.caption || null,
-                            fileName: m.fileName || null
+                            fileName: m.fileName || null,
+                            quotedMessageId: m.quotedMessageId || '',
+                            quotedText: m.quotedText || '',
+                            quotedParticipant: m.quotedParticipant || '',
+                            isReaction: !!m.isReaction,
+                            reactionTo: m.reactionTo || '',
+                            reactionText: m.reactionText || ''
                         };
                     });
                     var added = waDB_mergeMsgs(wawActiveChatId, normalized);
@@ -6841,8 +7029,11 @@
                         } else { exists.name=name||exists.name; if(ct.picture||ct.profilePicUrl){ exists.picture=ct.picture||ct.profilePicUrl; exists.profilePicUrl=exists.picture; } }
                     });
 
+                    saved = wawPrunePlaceholderChats(saved);
                     waDB_saveChats(saved);
-                    wawBuildAllChats(); wawRenderChatList(); wawUpdateTotalBadge();
+                    wawSyncServerChats().then(function(){
+                        wawBuildAllChats(); wawRenderChatList(); wawUpdateTotalBadge();
+                    });
                     if(rawGroups.length===0 && rawContacts.length===0){
                         toast('⚠️ Aucun groupe/contact — WhatsApp connecté?','var(--amber)');
                     } else {
@@ -7197,6 +7388,7 @@
                     <div class="waw-sb-avatar">💬</div>
                     <span class="waw-sb-title">KAMOA Hub</span>
                     <span id="wawUnreadTotal" style="font-size:9px;color:#25D366;font-family:var(--mono);margin-right:2px"></span>
+                    <button class="waw-sb-icon-btn" onclick="wawNewChat()" title="Nouveau message"><i class="fas fa-plus"></i></button>
                     <button class="waw-sb-icon-btn" onclick="waLoadFromUltraMsg()" title="Synchroniser groupes/contacts"><i class="fas fa-sync-alt" id="waLoadIcon"></i></button>
                     <button class="waw-sb-icon-btn" onclick="waRequestNotif()" title="Notifications" id="waNotifIconBtn">🔔</button>
                     <button class="waw-sb-icon-btn" onclick="waDisconnect()" title="Déconnecter" style="font-size:13px">⏻</button>
@@ -7319,6 +7511,22 @@
                         </div>
                     </div>
                 </div>
+            </div>
+        </div>
+    </div>
+    <div class="waw-picker" id="wawPicker" onclick="if(event.target===this)wawCloseRecipientPicker()">
+        <div class="waw-picker-box">
+            <div class="waw-picker-head">
+                <div class="waw-picker-title" id="wawPickerTitle">Nouveau message</div>
+                <button class="waw-picker-close" onclick="wawCloseRecipientPicker()"><i class="fas fa-times"></i></button>
+            </div>
+            <div class="waw-picker-search">
+                <input id="wawPickerSearch" placeholder="Rechercher contacts ou groupes..." oninput="wawBuildRecipientPicker(this.value)">
+            </div>
+            <div class="waw-picker-list" id="wawPickerList"></div>
+            <div class="waw-picker-manual">
+                <input id="wawPickerManual" placeholder="+243... ou jid@g.us" onkeydown="if(event.key==='Enter')wawPickManualRecipient()">
+                <button onclick="wawPickManualRecipient()">OK</button>
             </div>
         </div>
     </div>
