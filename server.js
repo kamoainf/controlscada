@@ -33,6 +33,8 @@ let waQrBase64   = null;
 let waConnNumber = null;
 let waConnected  = false;
 let waInitialized = false;
+let waReconnectTimer = null;
+let waStarting = false;
 
 // ── Caches chats / messages / médias ──────────────────────────────────────────
 let cachedChats    = [];
@@ -67,12 +69,17 @@ function broadcast(obj) {
 }
 
 // ── Dossier auth (persist session entre redémarrages) ─────────────────────────
-const AUTH_DIR = path.join('/tmp', 'kamoa_auth');
+const AUTH_DIR = process.env.WA_AUTH_DIR || path.join('/tmp', 'kamoa_auth');
 if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
 
 // ── Initialiser Baileys ───────────────────────────────────────────────────────
 async function initWhatsApp() {
-    if (waInitialized) return;
+    // Protection contre plusieurs instances Baileys en même temps
+    if (waStarting || waInitialized || waSocket) {
+        console.log('ℹ️ Baileys déjà actif ou en démarrage — init ignoré');
+        return;
+    }
+    waStarting = true;
     waInitialized = true;
 
     try {
@@ -87,11 +94,11 @@ async function initWhatsApp() {
         waSocket = makeWASocket({
             version,
             auth: state,
-            printQRInTerminal: true,
             browser: ['KAMOA SCADA', 'Chrome', '1.0'],
             generateHighQualityLinkPreview: false,
             syncFullHistory: false,
         });
+        waStarting = false;
 
         // ── Événement : QR Code ───────────────────────────────────────────────
         waSocket.ev.on('connection.update', async (update) => {
@@ -129,18 +136,32 @@ async function initWhatsApp() {
                 waConnected = false;
                 waStatus = 'disconnected';
                 broadcast({ type: 'status', status: 'disconnected' });
+
                 const code = lastDisconnect?.error?.output?.statusCode;
                 const shouldReconnect = code !== DisconnectReason.loggedOut;
                 console.log('🔴 Connexion fermée, code:', code, '— reconnect:', shouldReconnect);
+
+                try { waSocket?.end?.(); } catch (_) {}
+                waSocket = null;
+                waInitialized = false;
+                waStarting = false;
+
+                if (waReconnectTimer) clearTimeout(waReconnectTimer);
+
                 if (shouldReconnect) {
-                    waInitialized = false;
-                    setTimeout(initWhatsApp, 5000);
+                    // Un seul timer de reconnexion pour éviter la boucle code 440
+                    waReconnectTimer = setTimeout(() => {
+                        waReconnectTimer = null;
+                        if (!waSocket && !waInitialized && !waStarting) initWhatsApp();
+                    }, 8000);
                 } else {
                     // Logged out — supprimer la session
                     fs.rmSync(AUTH_DIR, { recursive: true, force: true });
                     fs.mkdirSync(AUTH_DIR, { recursive: true });
-                    waInitialized = false;
-                    setTimeout(initWhatsApp, 2000);
+                    waReconnectTimer = setTimeout(() => {
+                        waReconnectTimer = null;
+                        if (!waSocket && !waInitialized && !waStarting) initWhatsApp();
+                    }, 2000);
                 }
             }
         });
@@ -211,8 +232,15 @@ async function initWhatsApp() {
 
     } catch (err) {
         console.error('❌ Baileys init error:', err.message);
+        waSocket = null;
         waInitialized = false;
-        setTimeout(initWhatsApp, 8000);
+        waStarting = false;
+        if (!waReconnectTimer) {
+            waReconnectTimer = setTimeout(() => {
+                waReconnectTimer = null;
+                if (!waSocket && !waInitialized && !waStarting) initWhatsApp();
+            }, 8000);
+        }
     }
 }
 
@@ -231,8 +259,8 @@ app.use(cors({
     allowedHeaders: ['Content-Type', 'Authorization', 'x-api-key']
 }));
 app.options('*', cors());
-app.use(bodyParser.json({ limit: '10mb' }));
-app.use(bodyParser.urlencoded({ extended: true }));
+app.use(bodyParser.json({ limit: '50mb' }));
+app.use(bodyParser.urlencoded({ extended: true, limit: '50mb' }));
 app.use(express.static('./'));
 
 // ── WebSocket : envoyer état courant aux nouveaux clients ──────────────────────
@@ -260,12 +288,11 @@ app.get('/api/health', (req, res) => {
 // Init / démarrer QR
 app.post('/api/whatsapp/init', async (req, res) => {
     try {
-        if (waConnected) {
+        if (waConnected && waSocket) {
             return res.json({ success: true, status: 'open', phone: waConnNumber, message: 'Déjà connecté' });
         }
-        waInitialized = false;
-        initWhatsApp();
-        res.json({ success: true, message: 'Initialisation Baileys démarrée', status: waStatus });
+        if (!waSocket && !waInitialized && !waStarting) initWhatsApp();
+        res.json({ success: true, message: 'Initialisation Baileys demandée', status: waStatus, starting: waStarting });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -290,9 +317,9 @@ app.post('/api/whatsapp/send', async (req, res) => {
     if (!waConnected || !waSocket) return res.status(503).json({ error: 'WhatsApp non connecté' });
 
     try {
-        const jid = to.replace(/\D/g, '') + '@s.whatsapp.net';
-        await waSocket.sendMessage(jid, { text: message });
-        res.json({ success: true });
+        const jid = String(to).includes('@g.us') ? toGroupJid(to) : toJid(to);
+        const result = await waSocket.sendMessage(jid, { text: message });
+        res.json({ success: true, messageId: result?.key?.id });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -301,6 +328,7 @@ app.post('/api/whatsapp/send', async (req, res) => {
 // Logout / Reset session
 app.post('/api/whatsapp/logout', async (req, res) => {
     try {
+        if (waReconnectTimer) { clearTimeout(waReconnectTimer); waReconnectTimer = null; }
         if (waSocket) await waSocket.logout().catch(() => {});
         waSocket = null; waConnected = false; waStatus = 'disconnected';
         waQrBase64 = null; waConnNumber = null; waInitialized = false;
@@ -314,15 +342,47 @@ app.post('/api/whatsapp/logout', async (req, res) => {
     }
 });
 
-// Récupérer groupes/contacts
+// Récupérer groupes + contacts connus par Baileys
 app.get('/api/whatsapp/chats', async (req, res) => {
-    if (!waConnected || !waSocket) return res.status(503).json({ error: 'WhatsApp non connecté' });
+    if (!waConnected || !waSocket) return res.status(503).json({ error: 'WhatsApp non connecté', status: waStatus });
     try {
-        const groups = await waSocket.groupFetchAllParticipating();
-        const chats = Object.entries(groups).map(([id, g]) => ({
-            id, name: g.subject || id, isGroup: true, participants: g.participants?.length || 0
-        }));
-        res.json({ success: true, chats });
+        const byId = new Map();
+        cachedChats.forEach(c => {
+            if (c && c.id) byId.set(c.id, {
+                id: c.id,
+                name: c.name || c.pushName || c.id,
+                isGroup: !!c.isGroup || String(c.id).endsWith('@g.us'),
+                participants: c.participants || undefined,
+                unreadCount: c.unreadCount || 0,
+                timestamp: c.timestamp || 0,
+                lastMessage: c.lastMessage || '',
+                picture: c.picture || null,
+            });
+        });
+
+        // Compléter avec les groupes participatifs, sans écraser les messages du cache
+        try {
+            const groups = await waSocket.groupFetchAllParticipating();
+            Object.entries(groups || {}).forEach(([id, g]) => {
+                const old = byId.get(id) || {};
+                byId.set(id, {
+                    ...old,
+                    id,
+                    name: old.name && old.name !== id ? old.name : (g.subject || id),
+                    isGroup: true,
+                    participants: g.participants?.length || old.participants || 0,
+                    unreadCount: old.unreadCount || 0,
+                    timestamp: old.timestamp || Math.floor(Date.now()/1000),
+                    lastMessage: old.lastMessage || '',
+                    picture: old.picture || null,
+                });
+            });
+        } catch (e) {
+            console.warn('⚠️ groupFetchAllParticipating:', e.message);
+        }
+
+        const chats = Array.from(byId.values()).sort((a,b) => (b.timestamp||0) - (a.timestamp||0));
+        res.json({ success: true, chats, count: chats.length });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -485,8 +545,16 @@ server.listen(PORT, () => {
 ║  🌐 https://controlscada-production.up.railway.app ║
 ║  🌐 Port: ${PORT}                                   ║
 ╚══════════════════════════════════════════════════╝`);
-    // Démarrer WhatsApp automatiquement
-    setTimeout(initWhatsApp, 2000);
+    // Démarrer WhatsApp automatiquement une seule fois
+    setTimeout(() => {
+        if (!waSocket && !waInitialized && !waStarting) initWhatsApp();
+    }, 2000);
+});
+
+process.on('SIGTERM', () => {
+    console.log('SIGTERM reçu — fermeture serveur');
+    try { waSocket?.end?.(); } catch (_) {}
+    server.close(() => process.exit(0));
 });
 
 module.exports = app;
