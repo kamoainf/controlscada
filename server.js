@@ -43,6 +43,7 @@ let cachedContacts = [];
 const groupNames = new Map();
 const rawMessages = new Map();
 const mediaMessages = new Map();
+const sentMediaCache = new Map();
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function toJid(number) {
@@ -72,6 +73,13 @@ function getBestContactName(jid, fallback = '') {
     const contact = cachedContacts.find(c => c.id === id || c.jid === id || jidToNumber(c.id || c.jid) === num);
     const name = contact && (contact.name || contact.notify || contact.verifiedName || contact.pushName || contact.shortName);
     return name || fallback || num || id;
+}
+
+function getDisplayName(jid, fallback = '') {
+    const name = getBestContactName(jid, fallback);
+    const num = jidToNumber(jid);
+    if (!name || name === jid || name === num) return num ? '+' + num : (fallback || jid);
+    return name;
 }
 
 async function getProfilePictureSafe(jid) {
@@ -396,6 +404,7 @@ async function initWhatsApp() {
                 const mimeType   = cleanMessage?.[msgType]?.mimetype || null;
                 const quoted = getQuotedInfo(cleanMessage);
                 const reaction = cleanMessage.reactionMessage || null;
+                if (!body && !hasMedia && !reaction) return;
                 if (!isGroup && pushName) {
                     upsertContacts([{ id: chatId, name: pushName, pushName }]);
                 }
@@ -860,6 +869,10 @@ app.delete('/api/whatsapp/chat/:chatId', async (req, res) => {
         for (const [msgId, msg] of mediaMessages.entries()) {
             if ((msg.key?.remoteJid ?? '') === chatId) mediaMessages.delete(msgId);
         }
+        for (const [msgId] of sentMediaCache.entries()) {
+            const m = cachedMessages.find(x => x.id === msgId);
+            if (m?.chatId === chatId) sentMediaCache.delete(msgId);
+        }
 
         broadcast({ type: 'chat_deleted', chatId });
         console.log(`🗑️  Chat supprimé : ${chatId}`);
@@ -901,6 +914,18 @@ app.post('/api/whatsapp/send-media-base64', async (req, res) => {
         if (quotedMessageId && rawMessages.has(quotedMessageId)) options.quoted = rawMessages.get(quotedMessageId);
         const result    = await withTimeout(waSocket.sendMessage(jid, msgContent, options), 45_000, 'sendMediaBase64');
         const messageId = result?.key?.id ?? 'sent';
+        if (messageId && messageId !== 'sent') {
+            sentMediaCache.set(messageId, {
+                data: base64,
+                mimetype,
+                fileName: filename,
+                createdAt: Date.now(),
+            });
+            if (sentMediaCache.size > 300) {
+                const oldest = Array.from(sentMediaCache.entries()).sort((a, b) => (a[1].createdAt || 0) - (b[1].createdAt || 0)).slice(0, 50);
+                oldest.forEach(([id]) => sentMediaCache.delete(id));
+            }
+        }
         rememberCachedMessage({
             id: messageId,
             chatId: jid,
@@ -946,6 +971,10 @@ app.get('/api/whatsapp/media/:msgId', async (req, res) => {
         return res.status(503).json({ error: 'WhatsApp non connecté' });
     const msgId = decodeURIComponent(req.params.msgId);
     try {
+        const sent = sentMediaCache.get(msgId);
+        if (sent) {
+            return res.json({ success: true, data: sent.data, mimetype: sent.mimetype, fileName: sent.fileName, sent: true });
+        }
         const { downloadMediaMessage } = await import('@whiskeysockets/baileys');
         const rawMsg = mediaMessages.get(msgId);
         if (!rawMsg)

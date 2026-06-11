@@ -5541,6 +5541,7 @@
                 return false;
             }
             newMsgs.forEach(function(m){
+                if (!m.isReaction && !m.body && !m.hasMedia && !m.mediaData && !m.mediaType) return;
                 if (m.isReaction && m.reactionTo) {
                     if (!applyReaction(m)) wawPendingReactions.push(Object.assign({ chatId: chatId }, m));
                     return;
@@ -5555,7 +5556,13 @@
                     return sameBody && sameMedia && closeTime;
                 });
                 if (match) {
+                    var oldMediaData = match.mediaData;
+                    var oldMediaMime = match.mediaMime;
+                    var keepMediaData = oldMediaData && !m.mediaData;
+                    var keepMediaMime = oldMediaMime && !m.mediaMime;
                     Object.assign(match, m, { id: match.id, serverId: m.id || match.serverId, delivered: m.delivered !== false });
+                    if (keepMediaData) match.mediaData = oldMediaData;
+                    if (keepMediaMime) match.mediaMime = oldMediaMime;
                     ids[match.id] = true;
                     if (match.serverId) ids[match.serverId] = true;
                 } else if (!ids[m.id]) {
@@ -5695,6 +5702,19 @@
                 var cid = c.umId || c.phone || c.id || '';
                 return cid === jid || waJidToNum(cid) === num || String(c.phone || '').replace(/\D/g,'') === num;
             });
+            if (!found) {
+                chats.some(function(c){
+                    var cid = c.umId || c.phone || c.id;
+                    var msg = waDB_loadMsgs(cid).find(function(m){
+                        return waJidToNum(m.participant || '') === num || waJidToNum(m.from || '') === num;
+                    });
+                    if (msg && msg.from && msg.from !== 'me' && msg.from.indexOf('@') === -1) {
+                        found = { name: msg.from };
+                        return true;
+                    }
+                    return false;
+                });
+            }
             var name = found && found.name && found.name.indexOf('@') === -1 ? found.name : '';
             return name || (num ? '+' + num : jid);
         }
@@ -5703,8 +5723,15 @@
             (mentionedJid || []).forEach(function(jid){
                 var num = waJidToNum(jid);
                 if (!num) return;
-                var name = '@' + wawContactNameByJid(jid).replace(/^\+/, '');
-                text = text.replace(new RegExp('@?' + num.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'), 'g'), name);
+                var display = wawContactNameByJid(jid);
+                var name = '@' + display.replace(/^\+/, '');
+                var compact = num.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+                text = text.replace(new RegExp('@?' + compact, 'g'), name);
+                text = text.replace(new RegExp('@\\+' + compact, 'g'), name);
+            });
+            text = text.replace(/@(\d{8,15})/g, function(full, num){
+                var jid = num + '@s.whatsapp.net';
+                return '@' + wawContactNameByJid(jid).replace(/^\+/, '');
             });
             return waEscapeHtml(text).replace(/\n/g,'<br>');
         }
@@ -6334,7 +6361,8 @@
             else if (mt === 'document') { icon = '📄'; label = 'Document'; }
             else if (mt === 'sticker') { icon = '😊'; label = 'Sticker'; }
             var caption = m.caption ? '<div style="font-size:11px;color:#e9edef;margin-top:4px">'+m.caption.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</div>' : '';
-            return '<div class="waw-media-placeholder" onclick="wawRequestMedia(\''+m.id+'\',this)" '
+            var loadId = m.serverId || m.id;
+            return '<div class="waw-media-placeholder" onclick="wawRequestMedia(\''+waJsArg(loadId)+'\',this,\''+waJsArg(m.id)+'\')" '
                 +'style="display:flex;align-items:center;gap:8px;background:rgba(255,255,255,.07);border:1px dashed rgba(255,255,255,.15);border-radius:10px;padding:10px 14px;cursor:pointer;min-width:180px;transition:all .2s" '
                 +'onmouseover="this.style.background=\'rgba(37,211,102,.08)\';this.style.borderColor=\'rgba(37,211,102,.3)\'" '
                 +'onmouseout="this.style.background=\'rgba(255,255,255,.07)\';this.style.borderColor=\'rgba(255,255,255,.15)\'">'
@@ -6345,7 +6373,7 @@
                 +'</div>'+caption;
         }
 
-        function wawRequestMedia(msgId, el) {
+        function wawRequestMedia(msgId, el, localId) {
             if (!el) return;
             el.innerHTML = '<div style="font-size:11px;color:#25D366;font-family:var(--mono)">⏳ Chargement…</div>';
             fetch(RAILWAY_API+'/whatsapp/media/'+encodeURIComponent(msgId))
@@ -6354,7 +6382,7 @@
                     if (d.data || d.base64) {
                         var chatId = wawActiveChatId;
                         var msgs = waDB_loadMsgs(chatId);
-                        var m = msgs.find(function(x){return x.id===msgId;});
+                        var m = msgs.find(function(x){return x.id===msgId || x.serverId===msgId || x.id===localId;});
                         if (m) {
                             m.mediaData = d.data || d.base64;
                             m.mediaMime = d.mimetype || d.mime || m.mediaMime || 'application/octet-stream';
