@@ -3979,12 +3979,28 @@
             } catch (e) {}
         }
 
-        function saveHistory() { localStorage.setItem('km_hist', JSON.stringify(history)); }
-        function saveCustom() { localStorage.setItem('km_custom', JSON.stringify(customFaults)); }
-        function saveTrk() { localStorage.setItem('km_trk', JSON.stringify(trkItems)); }
-        function saveMem() { localStorage.setItem('km_locm', JSON.stringify(locMem));
-            localStorage.setItem('km_descm', JSON.stringify(descMem));
-            localStorage.setItem('km_combos', JSON.stringify(recentCombos)); }
+        function safeLocalSet(key, value) {
+            try {
+                localStorage.setItem(key, value);
+                return true;
+            } catch (e) {
+                cleanupWaLocalMediaCache();
+                try {
+                    localStorage.setItem(key, value);
+                    return true;
+                } catch (e2) {
+                    console.warn('localStorage save failed:', key, e2.message);
+                    toast('⚠️ Stockage navigateur plein — médias WhatsApp nettoyés', 'var(--amber)');
+                    return false;
+                }
+            }
+        }
+        function saveHistory() { safeLocalSet('km_hist', JSON.stringify(history)); }
+        function saveCustom() { safeLocalSet('km_custom', JSON.stringify(customFaults)); }
+        function saveTrk() { return safeLocalSet('km_trk', JSON.stringify(trkItems)); }
+        function saveMem() { safeLocalSet('km_locm', JSON.stringify(locMem));
+            safeLocalSet('km_descm', JSON.stringify(descMem));
+            safeLocalSet('km_combos', JSON.stringify(recentCombos)); }
         function saveHistSup() { localStorage.setItem('km_hist_sup', JSON.stringify(histSupReports)); }
         function saveHistTrk() { localStorage.setItem('km_hist_trk', JSON.stringify(histTrkReports)); }
         function saveCompScores() { localStorage.setItem('km_comp_scores', JSON.stringify(compScores));
@@ -5002,32 +5018,35 @@
                 '#descWrap')) acClose('desc'); });
 
         // TRACKER
-        function addItem() { const loc = document.getElementById('trkLoc').value.trim(); const desc = document.getElementById(
-                'trkDesc').value.trim(); const cat = document.getElementById('trkCat').value; const stat = document
-                .getElementById('trkStat').value; let start = document.getElementById('trkStart').value; if (!start) start =
-                getTime(); if (!loc || !desc) { toast('⚠️ Fill location & description', 'var(--amber)'); return; }
-            addMem(locMem, loc);
-            addMem(descMem, desc);
-            addCombo(loc, desc, cat);
+        function addItem() {
+            const locEl = document.getElementById('trkLoc');
+            const descEl = document.getElementById('trkDesc');
+            const catEl = document.getElementById('trkCat');
+            const statEl = document.getElementById('trkStat');
+            const startEl = document.getElementById('trkStart');
+            const loc = (locEl?.value || '').trim();
+            const desc = (descEl?.value || '').trim();
+            const cat = catEl?.value || 'ELECTRICAL';
+            const stat = statEl?.value || 'Pending';
+            let start = startEl?.value || getTime();
+            if (!loc || !desc) { toast('⚠️ Fill location & description', 'var(--amber)'); return; }
+
             trkItems.unshift({ id: Date.now(), location: loc, description: desc, category: cat, status: stat, startTime: start,
                 endTime: '', details: '' });
-            document.getElementById('trkLoc').value = '';
-            document.getElementById('trkDesc').value = '';
-            document.getElementById('trkStat').value = 'Pending';
-            document.getElementById('trkStart').value = getTime();
-            startTrkTimers();
-            updateTrkQuickStats();
-            acClose('loc');
-            acClose('desc');
             saveTrk();
-            saveMem();
-            renderTrkList();
-            updateTrkStats();
-            updatePerf();
-            renderQuickLocs();
-            renderCombos();
-            refreshReport();
-            toast(`✅ Added — ${loc}`); }
+
+            try { addMem(locMem, loc); addMem(descMem, desc); addCombo(loc, desc, cat); saveMem(); } catch (e) { console.warn('Tracker memory update failed:', e.message); }
+            if (locEl) locEl.value = '';
+            if (descEl) descEl.value = '';
+            if (statEl) statEl.value = 'Pending';
+            if (startEl) startEl.value = getTime();
+            startTrkTimers();
+            try { acClose('loc'); acClose('desc'); } catch (_) {}
+            try { renderTrkList(); } catch (e) { console.warn('Tracker list render failed:', e.message); }
+            try { updateTrkStats(); updateTrkQuickStats(); updatePerf(); } catch (e) { console.warn('Tracker stats update failed:', e.message); }
+            try { renderQuickLocs(); renderCombos(); refreshReport(); } catch (e) { console.warn('Tracker report update failed:', e.message); }
+            toast(`✅ Added — ${loc}`);
+        }
 
         function trkGetPriority(item){
             if(item.sev==='critical'||item.status==='Stopped') return 'high';
@@ -5508,7 +5527,36 @@
             var s = localStorage.getItem('kmWaChats');
             return s ? JSON.parse(s) : WA_GROUPS_DEFAULT.map(function(g){return Object.assign({},g);});
         }
-        function waDB_saveChats(arr){ localStorage.setItem('kmWaChats', JSON.stringify(arr)); }
+        function cleanupWaLocalMediaCache(){
+            try {
+                Object.keys(localStorage).forEach(function(key){
+                    if (key.indexOf('kmWaMsgs_') !== 0) return;
+                    var msgs = JSON.parse(localStorage.getItem(key) || '[]');
+                    var changed = false;
+                    msgs.forEach(function(m){
+                        if (m && m.mediaData) {
+                            delete m.mediaData;
+                            delete m.mediaMime;
+                            changed = true;
+                        }
+                    });
+                    if (changed) localStorage.setItem(key, JSON.stringify(msgs.slice(-250)));
+                });
+            } catch (e) {
+                console.warn('WA media cleanup failed:', e.message);
+            }
+        }
+        function waStripStoredMedia(msgs){
+            return (msgs || []).map(function(m){
+                if (!m || !m.mediaData) return m;
+                var copy = Object.assign({}, m);
+                delete copy.mediaData;
+                delete copy.mediaMime;
+                copy.hasMedia = true;
+                return copy;
+            });
+        }
+        function waDB_saveChats(arr){ safeLocalSet('kmWaChats', JSON.stringify(arr)); }
 
         // Load ALL messages for a chatId (from localStorage)
         function waDB_loadMsgs(chatId){
@@ -5521,7 +5569,10 @@
             var key = 'kmWaMsgs_' + chatId.replace(/[^a-zA-Z0-9]/g,'_');
             // Keep last 500 messages per chat
             if (msgs.length > 500) msgs = msgs.slice(-500);
-            localStorage.setItem(key, JSON.stringify(msgs));
+            var lightMsgs = waStripStoredMedia(msgs);
+            if (!safeLocalSet(key, JSON.stringify(lightMsgs))) {
+                safeLocalSet(key, JSON.stringify(lightMsgs.slice(-250)));
+            }
         }
         // Append/merge new messages (dedup by id)
         function waDB_mergeMsgs(chatId, newMsgs){
@@ -5720,16 +5771,18 @@
         }
         function wawFormatMessageText(raw, mentionedJid){
             var text = String(raw || '');
-            (mentionedJid || []).forEach(function(jid){
+            var mentions = Array.isArray(mentionedJid) ? mentionedJid : (mentionedJid ? [mentionedJid] : []);
+            mentions.forEach(function(item){
+                var jid = typeof item === 'string' ? item : (item && (item.jid || item.id || item.participant || item));
                 var num = waJidToNum(jid);
                 if (!num) return;
                 var display = wawContactNameByJid(jid);
                 var name = '@' + display.replace(/^\+/, '');
                 var compact = num.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
-                text = text.replace(new RegExp('@?' + compact, 'g'), name);
-                text = text.replace(new RegExp('@\\+' + compact, 'g'), name);
+                text = text.replace(new RegExp('[\\u200e\\u200f]?@?\\+?' + compact, 'g'), name);
             });
-            text = text.replace(/@(\d{8,15})/g, function(full, num){
+            text = text.replace(/[\u200e\u200f]?@(\+?\d{8,15})/g, function(full, rawNum){
+                var num = rawNum.replace(/\D/g,'');
                 var jid = num + '@s.whatsapp.net';
                 return '@' + wawContactNameByJid(jid).replace(/^\+/, '');
             });
@@ -5759,20 +5812,25 @@
             }
             return dbChats;
         }
-        async function wawSyncServerChats(){
+        var wawLastServerSync = 0;
+        async function wawSyncServerChats(force){
+            var now = Date.now();
+            if (!force && wawLastServerSync && (now - wawLastServerSync < 5 * 60 * 1000)) return true;
+            wawLastServerSync = now;
             try {
-                var r = await fetch(RAILWAY_API + '/whatsapp/chats');
+                var refresh = force ? '?refresh=1' : '';
+                var r = await fetch(RAILWAY_API + '/whatsapp/chats' + refresh);
                 var d = await r.json();
                 if (!r.ok || !d.success) return false;
                 var dbChats = waDB_loadChats();
                 (d.chats || []).forEach(function(c){ dbChats = waUpsertChat(dbChats, c); });
                 try {
-                    var cr = await fetch(RAILWAY_API + '/whatsapp/contacts');
+                    var cr = await fetch(RAILWAY_API + '/whatsapp/contacts' + refresh);
                     var cd = await cr.json();
                     if (cr.ok && cd.success) (cd.contacts || []).forEach(function(c){ dbChats = waUpsertChat(dbChats, c); });
                 } catch(_) {}
                 try {
-                    var gr = await fetch(RAILWAY_API + '/whatsapp/groups');
+                    var gr = await fetch(RAILWAY_API + '/whatsapp/groups' + refresh);
                     var gd = await gr.json();
                     if (gr.ok && gd.success) (gd.groups || []).forEach(function(g){ dbChats = waUpsertChat(dbChats, g); });
                 } catch(_) {}
@@ -5802,7 +5860,7 @@
                 wawBuildAllChats();
                 wawRenderChatList();
                 wawUpdateTotalBadge();
-                wawSyncServerChats();
+                wawSyncServerChats(false);
             } else {
                 if (waMyPhone) document.getElementById('waMyPhone').value = waMyPhone;
             }
@@ -6945,7 +7003,7 @@
         // ── FETCH INBOX (tous les messages récents depuis Railway) ───
         // Essaie /messages d'abord, puis fallback /chats si 404
         function wawFetchInbox(manual){
-            wawSyncServerChats();
+            wawSyncServerChats(!!manual);
             function processInboxData(data){
                 // Accepte { success, chats:{jid:{body,ts,pushName,fromMe,id}} }
                 // ou tableau direct [{from,body,ts,...}]
@@ -6966,7 +7024,8 @@
                         var d2 = ts ? new Date(ts*1000) : new Date();
                         var entry = { id:m.id||(''+(ts||Date.now())+cid), from:name, body:m.body||'', fromMe:!!m.fromMe,
                             ts:ts, time:d2.toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'}),
-                            date:d2.toLocaleDateString('fr-FR'), read:(cid===wawActiveChatId), delivered:true };
+                            date:d2.toLocaleDateString('fr-FR'), read:(cid===wawActiveChatId), delivered:true,
+                            mentionedJid:m.mentionedJid || m.mentions || [] };
                         totalAdded += waDB_mergeMsgs(cid, [entry]);
                     });
                 } else {
@@ -6983,7 +7042,8 @@
                         var d2 = ts ? new Date(ts*1000) : new Date();
                         var entry = { id:m.id||(''+(ts||Date.now())+cid), from:name, body:m.body||m.message||'',
                             fromMe:!!m.fromMe, ts:ts, time:d2.toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'}),
-                            date:d2.toLocaleDateString('fr-FR'), read:(cid===wawActiveChatId), delivered:true };
+                            date:d2.toLocaleDateString('fr-FR'), read:(cid===wawActiveChatId), delivered:true,
+                            mentionedJid:m.mentionedJid || m.mentions || [] };
                         totalAdded += waDB_mergeMsgs(cid, [entry]);
                     });
                 }
@@ -7131,7 +7191,7 @@
 
                     saved = wawPrunePlaceholderChats(saved);
                     waDB_saveChats(saved);
-                    wawSyncServerChats().then(function(){
+                    wawSyncServerChats(true).then(function(){
                         wawBuildAllChats(); wawRenderChatList(); wawUpdateTotalBadge();
                     });
                     if(rawGroups.length===0 && rawContacts.length===0){
@@ -7321,6 +7381,7 @@
 
         // ===== TRACKER LIVE TIMER =====
         var _hrAlertedIds = new Set();
+        var _trkTimerHandle = null;
 
         function checkHourAlerts() {
             var now = new Date();
@@ -7356,7 +7417,8 @@
         }
 
         function startTrkTimers(){
-            setInterval(function(){
+            if (_trkTimerHandle) return;
+            _trkTimerHandle = setInterval(function(){
                 document.querySelectorAll('.trk-timer[data-start]').forEach(function(el){
                     var s=el.getAttribute('data-start');
                     el.textContent=trkElapsed(s);

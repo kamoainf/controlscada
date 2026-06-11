@@ -44,6 +44,7 @@ const groupNames = new Map();
 const rawMessages = new Map();
 const mediaMessages = new Map();
 const sentMediaCache = new Map();
+let participatingGroupsCache = { data: null, ts: 0, inflight: null };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function toJid(number) {
@@ -98,7 +99,8 @@ async function hydrateChat(chat) {
     let participants = chat.participants;
 
     if (isGroup) {
-        try {
+        name = groupNames.get(id) || name;
+        if (!groupNames.has(id)) try {
             const meta = await waSocket.groupMetadata(id);
             name = meta.subject || name || id;
             participants = meta.participants?.length || participants;
@@ -215,6 +217,41 @@ function withTimeout(promise, ms, label = 'operation') {
             val => { clearTimeout(timer); resolve(val); },
             err => { clearTimeout(timer); reject(err); }
         );
+    });
+}
+
+async function getParticipatingGroupsCached(force = false) {
+    if (!waSocket) return participatingGroupsCache.data || {};
+    const ttl = 5 * 60 * 1000;
+    const fresh = participatingGroupsCache.data && (Date.now() - participatingGroupsCache.ts < ttl);
+    if (!force && fresh) return participatingGroupsCache.data;
+    if (participatingGroupsCache.inflight) return participatingGroupsCache.inflight;
+
+    participatingGroupsCache.inflight = waSocket.groupFetchAllParticipating()
+        .then(groups => {
+            participatingGroupsCache = { data: groups || {}, ts: Date.now(), inflight: null };
+            Object.entries(groups || {}).forEach(([id, g]) => {
+                if (g?.subject) groupNames.set(id, g.subject);
+            });
+            return participatingGroupsCache.data;
+        })
+        .catch(err => {
+            participatingGroupsCache.inflight = null;
+            console.warn('⚠️ groupFetchAllParticipating:', err.message);
+            return participatingGroupsCache.data || {};
+        });
+
+    return participatingGroupsCache.inflight;
+}
+
+function learnContactsFromGroups(groups = {}) {
+    Object.values(groups || {}).forEach(g => {
+        (g.participants || []).forEach(p => {
+            const jid = p.id || p.jid;
+            if (!jid || String(jid).endsWith('@g.us')) return;
+            const known = cachedContacts.find(c => (c.id || c.jid) === jid);
+            if (!known) cachedContacts.push({ id: jid, jid, name: jidToNumber(jid), phone: jidToNumber(jid), isGroup: false });
+        });
     });
 }
 
@@ -741,7 +778,7 @@ app.get('/api/whatsapp/chats', async (req, res) => {
 
         // Compléter avec les groupes participatifs, sans écraser les messages du cache
         try {
-            const groups = await waSocket.groupFetchAllParticipating();
+            const groups = await getParticipatingGroupsCached(req.query.refresh === '1');
             Object.entries(groups || {}).forEach(([id, g]) => {
                 if (g.subject) groupNames.set(id, g.subject);
                 const old = byId.get(id) || {};
@@ -775,15 +812,8 @@ app.get('/api/whatsapp/contacts', async (req, res) => {
     if (!waConnected || !waSocket) return res.status(503).json({ error: 'WhatsApp non connecté', status: waStatus });
     try {
         try {
-            const groups = await waSocket.groupFetchAllParticipating();
-            Object.values(groups || {}).forEach(g => {
-                (g.participants || []).forEach(p => {
-                    const jid = p.id || p.jid;
-                    if (!jid || String(jid).endsWith('@g.us')) return;
-                    const known = cachedContacts.find(c => (c.id || c.jid) === jid);
-                    if (!known) cachedContacts.push({ id: jid, jid, name: jidToNumber(jid), phone: jidToNumber(jid), isGroup: false });
-                });
-            });
+            const groups = await getParticipatingGroupsCached(req.query.refresh === '1');
+            learnContactsFromGroups(groups);
         } catch (_) {}
         const contacts = [];
         for (const contact of cachedContacts) {
@@ -809,17 +839,11 @@ app.get('/api/whatsapp/contacts', async (req, res) => {
 app.get('/api/whatsapp/groups', async (req, res) => {
     if (!waConnected || !waSocket) return res.status(503).json({ error: 'WhatsApp non connecté', status: waStatus });
     try {
-        const groups = await waSocket.groupFetchAllParticipating();
+        const groups = await getParticipatingGroupsCached(req.query.refresh === '1');
+        learnContactsFromGroups(groups);
         const out = [];
         for (const [id, g] of Object.entries(groups || {})) {
             if (g.subject) groupNames.set(id, g.subject);
-            (g.participants || []).forEach(p => {
-                const jid = p.id || p.jid;
-                if (jid) {
-                    const known = cachedContacts.find(c => (c.id || c.jid) === jid);
-                    if (!known) cachedContacts.push({ id: jid, jid, name: jidToNumber(jid), phone: jidToNumber(jid), isGroup: false });
-                }
-            });
             const picture = await getProfilePictureSafe(id);
             out.push({
                 id,
