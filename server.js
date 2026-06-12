@@ -45,6 +45,8 @@ const rawMessages = new Map();
 const mediaMessages = new Map();
 const sentMediaCache = new Map();
 let participatingGroupsCache = { data: null, ts: 0, inflight: null };
+const MEDIA_CACHE_DIR = process.env.WA_MEDIA_CACHE_DIR || path.join('/tmp', 'kamoa_wa_media');
+try { fs.mkdirSync(MEDIA_CACHE_DIR, { recursive: true }); } catch (_) {}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function toJid(number) {
@@ -61,15 +63,31 @@ function normalizeChatJid(value) {
     if (!raw) return '';
     if (raw.includes('@g.us')) return toGroupJid(raw);
     if (raw.includes('@s.whatsapp.net')) return raw;
+    if (raw.includes('@lid')) return raw;
     return toJid(raw);
 }
 
+function resolveOutgoingJid(value, quotedMsg = null) {
+    const raw = String(value || '').trim();
+    const quotedJid = quotedMsg?.key?.remoteJid || quotedMsg?.chatId || '';
+    if (isLidJid(raw) && quotedJid && !isLidJid(quotedJid)) return quotedJid;
+    const jid = normalizeChatJid(raw || quotedJid);
+    if (!jid || isLidJid(jid)) throw new Error('Destinataire WhatsApp non résolu (@lid). Rechargez les contacts/groupes puis réessayez.');
+    return jid;
+}
+
 function jidToNumber(jid) {
-    return String(jid || '').replace('@s.whatsapp.net', '').replace('@g.us', '').split(':')[0];
+    const id = String(jid || '');
+    if (id.includes('@lid')) return '';
+    return id.replace('@s.whatsapp.net', '').replace('@g.us', '').split(':')[0];
 }
 
 function isNumericContactName(value) {
     return /^\+?\d{8,16}$/.test(String(value || '').replace(/\s/g, ''));
+}
+
+function isLidJid(value) {
+    return String(value || '').includes('@lid');
 }
 
 function bestNameFromContact(contact = {}) {
@@ -83,13 +101,13 @@ function getBestContactName(jid, fallback = '') {
     const contact = cachedContacts.find(c => c.id === id || c.jid === id || jidToNumber(c.id || c.jid) === num);
     const name = contact && bestNameFromContact(contact);
     const cleanFallback = fallback && !isNumericContactName(fallback) && !String(fallback).includes('@') ? fallback : '';
-    return name || cleanFallback || (num ? '+' + num : id);
+    return name || cleanFallback || (num ? '+' + num : 'Utilisateur WhatsApp');
 }
 
 function getDisplayName(jid, fallback = '') {
     const name = getBestContactName(jid, fallback);
     const num = jidToNumber(jid);
-    if (!name || name === jid || name === num) return num ? '+' + num : (fallback || jid);
+    if (!name || name === jid || name === num) return num ? '+' + num : (fallback || 'Utilisateur WhatsApp');
     return name;
 }
 
@@ -230,6 +248,42 @@ function withTimeout(promise, ms, label = 'operation') {
     });
 }
 
+function mediaCachePath(messageId, suffix) {
+    const safe = String(messageId || '').replace(/[^a-zA-Z0-9_-]/g, '_');
+    return path.join(MEDIA_CACHE_DIR, `${safe}.${suffix}`);
+}
+
+function saveJsonSafe(file, data) {
+    try { fs.writeFileSync(file, JSON.stringify(data)); } catch (e) { console.warn('⚠️ Cache média:', e.message); }
+}
+
+function readJsonSafe(file) {
+    try {
+        if (!fs.existsSync(file)) return null;
+        return JSON.parse(fs.readFileSync(file, 'utf8'));
+    } catch (_) {
+        return null;
+    }
+}
+
+function rememberMediaMessageOnDisk(messageId, msg) {
+    if (!messageId || !msg) return;
+    saveJsonSafe(mediaCachePath(messageId, 'raw.json'), msg);
+}
+
+function rememberSentMediaOnDisk(messageId, media) {
+    if (!messageId || !media?.data) return;
+    saveJsonSafe(mediaCachePath(messageId, 'sent.json'), media);
+}
+
+function loadSentMediaFromDisk(messageId) {
+    return readJsonSafe(mediaCachePath(messageId, 'sent.json'));
+}
+
+function loadRawMediaFromDisk(messageId) {
+    return readJsonSafe(mediaCachePath(messageId, 'raw.json'));
+}
+
 async function getParticipatingGroupsCached(force = false) {
     if (!waSocket) return participatingGroupsCache.data || {};
     const ttl = 5 * 60 * 1000;
@@ -260,7 +314,7 @@ function learnContactsFromGroups(groups = {}) {
             const jid = p.id || p.jid;
             if (!jid || String(jid).endsWith('@g.us')) return;
             const known = cachedContacts.find(c => (c.id || c.jid) === jid);
-            if (!known) cachedContacts.push({ id: jid, jid, name: jidToNumber(jid), phone: jidToNumber(jid), isGroup: false });
+            if (!known && !isLidJid(jid)) cachedContacts.push({ id: jid, jid, name: jidToNumber(jid), phone: jidToNumber(jid), isGroup: false });
         });
     });
 }
@@ -411,7 +465,7 @@ async function initWhatsApp() {
                 const normalized = {
                     id,
                     jid: id,
-                    name: incomingName || existingName || existing.name || ('+' + jidToNumber(id)),
+                    name: incomingName || existingName || existing.name || (jidToNumber(id) ? ('+' + jidToNumber(id)) : 'Utilisateur WhatsApp'),
                     notify: contact.notify || '',
                     verifiedName: contact.verifiedName || '',
                     pushName: contact.pushName || '',
@@ -461,7 +515,10 @@ async function initWhatsApp() {
                 if (isGroup && participant && pushName) {
                     upsertContacts([{ id: participant, name: pushName, pushName }]);
                 }
-                if (hasMedia) mediaMessages.set(msgId, msg);
+                if (hasMedia) {
+                    mediaMessages.set(msgId, msg);
+                    rememberMediaMessageOnDisk(msgId, msg);
+                }
                 const chatName = isGroup ? '' : getBestContactName(chatId, pushName);
                 const senderName = fromMe ? 'me' : (isGroup ? (pushName || getBestContactName(participant, participant || chatId)) : (chatName || pushName || chatId));
                 if (reaction) {
@@ -623,9 +680,9 @@ app.post('/api/whatsapp/send', async (req, res) => {
     if (!waConnected || !waSocket) return res.status(503).json({ error: 'WhatsApp non connecté' });
 
     try {
-        const jid = normalizeChatJid(to);
         const options = {};
         if (quotedMessageId && rawMessages.has(quotedMessageId)) options.quoted = rawMessages.get(quotedMessageId);
+        const jid = resolveOutgoingJid(to, options.quoted);
         const result = await waSocket.sendMessage(jid, { text: message }, options);
         const messageId = result?.key?.id;
         if (messageId) rememberCachedMessage({
@@ -650,10 +707,10 @@ app.post('/api/whatsapp/reply', async (req, res) => {
     if (!chatId || !messageId || !message) return res.status(400).json({ error: 'Champs requis: chatId, messageId, message' });
     if (!waConnected || !waSocket) return res.status(503).json({ error: 'WhatsApp non connecté' });
     try {
-        const jid = normalizeChatJid(chatId);
         const quoted = rawMessages.get(messageId);
-        if (!quoted) return res.status(404).json({ error: 'Message original introuvable dans le cache' });
-        const result = await waSocket.sendMessage(jid, { text: message }, { quoted });
+        const jid = resolveOutgoingJid(chatId, quoted || getMessageById(messageId));
+        const options = quoted ? { quoted } : {};
+        const result = await waSocket.sendMessage(jid, { text: message }, options);
         const sentId = result?.key?.id;
         if (sentId) rememberCachedMessage({
             id: sentId,
@@ -663,9 +720,9 @@ app.post('/api/whatsapp/reply', async (req, res) => {
             body: message,
             timestamp: Math.floor(Date.now() / 1000),
             isGroup: jid.endsWith('@g.us'),
-            quotedMessageId: messageId,
+            quotedMessageId: quoted ? messageId : '',
         });
-        res.json({ success: true, messageId: sentId });
+        res.json({ success: true, messageId: sentId, quoted: !!quoted });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -774,6 +831,7 @@ app.get('/api/whatsapp/chats', async (req, res) => {
         cachedContacts.forEach(c => {
             const id = c.id || c.jid;
             if (!id || isIgnorableChatId(id)) return;
+            if (isLidJid(id) && !bestNameFromContact(c)) return;
             const old = byId.get(id) || {};
             byId.set(id, {
                 ...old,
@@ -832,6 +890,7 @@ app.get('/api/whatsapp/contacts', async (req, res) => {
         for (const contact of cachedContacts) {
             const id = contact.id || contact.jid;
             if (!id || String(id).endsWith('@broadcast') || String(id).endsWith('@g.us')) continue;
+            if (isLidJid(id) && !bestNameFromContact(contact)) continue;
             const picture = contact.picture || await getProfilePictureSafe(id);
             contacts.push({
                 id,
@@ -933,7 +992,7 @@ app.post('/api/whatsapp/send-media-base64', async (req, res) => {
     }
 
     try {
-        const jid    = normalizeChatJid(to);
+        const jid    = resolveOutgoingJid(to, quotedMessageId ? rawMessages.get(quotedMessageId) : null);
         const buffer = Buffer.from(base64, 'base64');
 
         let msgContent;
@@ -953,6 +1012,12 @@ app.post('/api/whatsapp/send-media-base64', async (req, res) => {
         const messageId = result?.key?.id ?? 'sent';
         if (messageId && messageId !== 'sent') {
             sentMediaCache.set(messageId, {
+                data: base64,
+                mimetype,
+                fileName: filename,
+                createdAt: Date.now(),
+            });
+            rememberSentMediaOnDisk(messageId, {
                 data: base64,
                 mimetype,
                 fileName: filename,
@@ -1008,18 +1073,19 @@ app.get('/api/whatsapp/media/:msgId', async (req, res) => {
         return res.status(503).json({ error: 'WhatsApp non connecté' });
     const msgId = decodeURIComponent(req.params.msgId);
     try {
-        const sent = sentMediaCache.get(msgId);
+        const sent = sentMediaCache.get(msgId) || loadSentMediaFromDisk(msgId);
         if (sent) {
             return res.json({ success: true, data: sent.data, mimetype: sent.mimetype, fileName: sent.fileName, sent: true });
         }
         const { downloadMediaMessage } = await import('@whiskeysockets/baileys');
-        const rawMsg = mediaMessages.get(msgId);
+        const rawMsg = mediaMessages.get(msgId) || loadRawMediaFromDisk(msgId);
         if (!rawMsg)
-            return res.status(404).json({ success: false, error: 'Message média introuvable (peut être expiré)' });
+            return res.status(404).json({ success: false, expired: true, error: 'Média non disponible dans le cache serveur' });
         const buffer   = await withTimeout(downloadMediaMessage(rawMsg, 'buffer', {}), 30_000, 'downloadMedia');
-        const msgType  = Object.keys(rawMsg.message)[0];
-        const mimetype = rawMsg.message?.[msgType]?.mimetype || 'application/octet-stream';
-        const fileName = rawMsg.message?.documentMessage?.fileName || null;
+        const cleanMessage = unwrapMessage(rawMsg.message || {});
+        const msgType  = Object.keys(cleanMessage)[0];
+        const mimetype = cleanMessage?.[msgType]?.mimetype || 'application/octet-stream';
+        const fileName = cleanMessage?.documentMessage?.fileName || null;
         res.json({ success: true, data: buffer.toString('base64'), mimetype, fileName });
     } catch (err) {
         console.error('❌ Erreur média:', err.message);
