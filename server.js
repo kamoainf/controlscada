@@ -70,9 +70,9 @@ function normalizeChatJid(value) {
 function resolveOutgoingJid(value, quotedMsg = null) {
     const raw = String(value || '').trim();
     const quotedJid = quotedMsg?.key?.remoteJid || quotedMsg?.chatId || '';
-    if (isLidJid(raw) && quotedJid && !isLidJid(quotedJid)) return quotedJid;
+    if (isLidJid(raw)) return raw;
     const jid = normalizeChatJid(raw || quotedJid);
-    if (!jid || isLidJid(jid)) throw new Error('Destinataire WhatsApp non résolu (@lid). Rechargez les contacts/groupes puis réessayez.');
+    if (!jid) throw new Error('Destinataire WhatsApp non résolu. Rechargez les contacts/groupes puis réessayez.');
     return jid;
 }
 

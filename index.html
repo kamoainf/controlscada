@@ -7764,6 +7764,7 @@
                     <div style="margin-top:16px;display:flex;gap:8px;flex-wrap:wrap;justify-content:center">
                         <button onclick="waExportJSON()" style="background:rgba(212,133,58,.12);border:1px solid rgba(212,133,58,.3);border-radius:8px;color:#d4853a;padding:8px 14px;font-size:11px;cursor:pointer;font-family:var(--dis);font-weight:600"><i class="fas fa-download"></i> Export messages.json</button>
                         <label style="background:rgba(76,175,125,.12);border:1px solid rgba(76,175,125,.3);border-radius:8px;color:#4caf7d;padding:8px 14px;font-size:11px;cursor:pointer;font-family:var(--dis);font-weight:600"><i class="fas fa-upload"></i> Import messages.json<input type="file" accept=".json" style="display:none" onchange="waImportJSON(event)"></label>
+                        <button onclick="wawResetLocalWhatsApp()" style="background:rgba(232,85,85,.10);border:1px solid rgba(232,85,85,.32);border-radius:8px;color:#e85555;padding:8px 14px;font-size:11px;cursor:pointer;font-family:var(--dis);font-weight:600"><i class="fas fa-broom"></i> Nettoyer WhatsApp</button>
                     </div>
                 </div>
                 <!-- ACTIVE CONVERSATION -->
@@ -8855,6 +8856,381 @@ function convClearAll(){if(!confirm('Effacer toutes les données Conveyors?'))re
             toast('✅ Purged ' + removed + ' old entries');
         }
 
+        // ===== WHATSAPP CLEAN CORE v2 =====
+        (function installWhatsAppCleanCore(){
+            var CHAT_KEY = 'kmWaChats';
+            var CLEAN_FLAG = 'kmWaCleanCoreV2';
+
+            function jidOf(v){
+                return String(v || '').trim();
+            }
+            function isLid(v){ return jidOf(v).indexOf('@lid') !== -1; }
+            function isGroup(v){ return jidOf(v).indexOf('@g.us') !== -1; }
+            function isUserJid(v){ return jidOf(v).indexOf('@s.whatsapp.net') !== -1; }
+            function digits(v){ return jidOf(v).replace(/@s\.whatsapp\.net|@g\.us|@lid/g,'').replace(/\D/g,''); }
+            function isFakeNumberName(v){ return /^\+?\d{8,18}$/.test(String(v || '').replace(/\s/g,'')); }
+            function hasName(v){
+                var s = String(v || '').trim();
+                return !!s && s.indexOf('@') === -1 && !isFakeNumberName(s) && s !== 'Utilisateur WhatsApp';
+            }
+            function displayName(raw, jid){
+                var n = raw && (raw.name || raw.subject || raw.verifiedName || raw.notify || raw.pushName || raw.chatName || raw.sender);
+                if (!hasName(n)) n = '';
+                if (!n && isGroup(jid)) n = raw && (raw.subject || raw.name || raw.chatName);
+                if (!hasName(n)) {
+                    var d = digits(jid);
+                    n = (isLid(jid) ? 'Utilisateur WhatsApp' : (d ? '+' + d : 'Utilisateur WhatsApp'));
+                }
+                return n;
+            }
+            function normalizeDest(v){
+                var id = jidOf(v);
+                if (!id) return '';
+                if (id.indexOf('@') !== -1) return id;
+                var d = digits(id);
+                return d.length >= 8 ? d + '@s.whatsapp.net' : '';
+            }
+            function chatStorageKey(chatId){
+                return 'kmWaMsgs_' + jidOf(chatId).replace(/[^a-zA-Z0-9]/g,'_');
+            }
+            function cleanChat(raw){
+                var original = raw || {};
+                var jid = original.umId || original.jid || original.chatId || original.from || original.id || '';
+                jid = normalizeDest(jid) || normalizeDest(original.phone) || jidOf(jid);
+                if (!jid || wawIsIgnorableChatId(jid)) return null;
+                var g = isGroup(jid) || original.isGroup === true;
+                var name = displayName(original, jid);
+                return {
+                    id: original.id || ('wa_' + Date.now() + '_' + Math.random().toString(16).slice(2)),
+                    umId: jid,
+                    jid: jid,
+                    phone: isLid(jid) ? '' : digits(jid),
+                    emoji: original.emoji || (g ? '👥' : '👤'),
+                    name: name,
+                    desc: original.desc || '',
+                    isGroup: g,
+                    picture: original.picture || original.profilePicUrl || original.avatar || '',
+                    profilePicUrl: original.profilePicUrl || original.picture || original.avatar || '',
+                    pinned: !!original.pinned
+                };
+            }
+            function dedupeChats(list){
+                var byJid = {};
+                (list || []).forEach(function(item){
+                    var c = cleanChat(item);
+                    if (!c) return;
+                    var old = byJid[c.umId];
+                    if (!old) {
+                        byJid[c.umId] = c;
+                        return;
+                    }
+                    if (!hasName(old.name) && hasName(c.name)) old.name = c.name;
+                    if (!old.picture && c.picture) old.picture = old.profilePicUrl = c.picture;
+                    old.pinned = old.pinned || c.pinned;
+                });
+                return Object.keys(byJid).map(function(k){ return byJid[k]; }).sort(function(a,b){
+                    return (a.name || '').localeCompare(b.name || '');
+                });
+            }
+            function safeSet(k, v){
+                if (typeof safeLocalSet === 'function') return safeLocalSet(k, v);
+                try { localStorage.setItem(k, v); return true; } catch(e) { return false; }
+            }
+            function cleanBootstrap(){
+                var chats = dedupeChats(JSON.parse(localStorage.getItem(CHAT_KEY) || '[]'));
+                safeSet(CHAT_KEY, JSON.stringify(chats));
+                localStorage.setItem(CLEAN_FLAG, '1');
+                return chats;
+            }
+
+            waDB_loadChats = function(){
+                try { return dedupeChats(JSON.parse(localStorage.getItem(CHAT_KEY) || '[]')); }
+                catch(e) { return []; }
+            };
+            waDB_saveChats = function(arr){
+                safeSet(CHAT_KEY, JSON.stringify(dedupeChats(arr || [])));
+            };
+            waJidToNum = function(jid){
+                return isLid(jid) ? '' : digits(jid);
+            };
+            waNiceChatName = function(c, cid){
+                return displayName(c || {}, cid || c?.umId || c?.jid || c?.id);
+            };
+            wawResolveSendJid = function(chatId){
+                var id = jidOf(chatId);
+                var found = waDB_loadChats().find(function(c){ return c.umId === id || c.jid === id || c.id === id; });
+                var dest = (found && (found.umId || found.jid)) || id;
+                return normalizeDest(dest);
+            };
+            waUpsertChat = function(dbChats, raw){
+                var c = cleanChat(raw);
+                if (!c) return dedupeChats(dbChats || []);
+                var arr = dbChats || [];
+                var old = arr.find(function(x){ return (x.umId || x.jid || x.id) === c.umId; });
+                if (!old) arr.push(c);
+                else {
+                    old.umId = c.umId; old.jid = c.jid; old.phone = c.phone; old.isGroup = c.isGroup;
+                    old.emoji = old.emoji || c.emoji;
+                    if (!hasName(old.name) && hasName(c.name)) old.name = c.name;
+                    if (hasName(c.name) && !isGroup(c.umId)) old.name = c.name;
+                    if (c.picture) old.picture = old.profilePicUrl = c.picture;
+                }
+                return dedupeChats(arr);
+            };
+
+            wawBuildAllChats = function(){
+                var chats = waDB_loadChats();
+                var mapped = chats.map(function(c){
+                    var jid = c.umId || c.jid || c.id;
+                    var last = waDB_lastMsg(jid);
+                    return {
+                        id: jid,
+                        jid: jid,
+                        name: displayName(c, jid),
+                        emoji: c.emoji || (c.isGroup ? '👥' : '👤'),
+                        picture: c.picture || c.profilePicUrl || '',
+                        profilePicUrl: c.profilePicUrl || c.picture || '',
+                        phone: c.phone || '',
+                        isGroup: !!c.isGroup || isGroup(jid),
+                        pinned: !!c.pinned,
+                        unread: waDB_countUnread(jid),
+                        lastMsg: wawPreviewText(last),
+                        lastTime: last ? (last.time || (last.ts ? new Date(last.ts*1000).toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'}) : '')) : '',
+                        lastTs: last ? (last.ts || 0) : 0
+                    };
+                });
+                wawAllChats = mapped.sort(function(a,b){
+                    if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+                    return (b.lastTs || 0) - (a.lastTs || 0);
+                });
+                return wawAllChats;
+            };
+            wawRenderChatList = function(){
+                var list = document.getElementById('wawChatList');
+                if (!list) return;
+                var q = (wawSearchQ || '').toLowerCase();
+                var items = (wawAllChats || []).filter(function(c){
+                    if (wawCurrentFilter === 'groups' && !c.isGroup) return false;
+                    if (wawCurrentFilter === 'contacts' && c.isGroup) return false;
+                    if (!q) return true;
+                    return (c.name || '').toLowerCase().indexOf(q) !== -1 || (c.phone || '').indexOf(q) !== -1 || (c.id || '').toLowerCase().indexOf(q) !== -1;
+                });
+                if (!items.length) {
+                    list.innerHTML = '<div class="waw-empty" style="padding:30px 12px"><span>Aucune conversation</span></div>';
+                    return;
+                }
+                list.innerHTML = items.map(function(c){
+                    var active = c.id === wawActiveChatId;
+                    var preview = c.lastMsg || 'Aucun message';
+                    return '<div class="waw-ci'+(active?' active':'')+(c.pinned?' pinned':'')+'" data-cid="'+waEscapeHtml(c.id)+'" onclick="wawSelectChat(\''+waJsArg(c.id)+'\')">'
+                        +'<div class="waw-ci-av">'+(c.pinned?'📌':waAvatarHtml(c,c.emoji))+'</div>'
+                        +'<div class="waw-ci-body"><div class="waw-ci-top"><span class="waw-ci-name">'+waEscapeHtml(c.name)+'</span><span class="waw-ci-time">'+waEscapeHtml(c.lastTime)+'</span></div>'
+                        +'<div class="waw-ci-bottom"><span class="waw-ci-preview">'+waEscapeHtml(preview.length > 45 ? preview.slice(0,45)+'...' : preview)+'</span>'
+                        +(c.unread?'<span class="waw-ci-badge">'+c.unread+'</span>':'')+'</div></div>'
+                        +'<button class="waw-ci-pin-btn" title="'+(c.pinned?'Désépingler':'Épingler')+'" onclick="event.stopPropagation();wawTogglePin(\''+waJsArg(c.id)+'\')"><i class="fas fa-thumbtack"></i></button>'
+                        +'</div>';
+                }).join('');
+            };
+            wawSelectChat = function(chatId){
+                wawBuildAllChats();
+                var chat = wawAllChats.find(function(c){ return c.id === chatId; });
+                if (!chat) return;
+                wawActiveChatId = chat.id;
+                wawActiveChatName = chat.name;
+                wawActiveChatEmoji = chat.emoji || '👤';
+                wawMsgSearchQ = '';
+                document.querySelectorAll('.waw-ci').forEach(function(el){ el.classList.remove('active'); });
+                var safeSel = String(chat.id).replace(/"/g,'\\"');
+                var ci = document.querySelector('.waw-ci[data-cid="'+safeSel+'"]');
+                if (ci) ci.classList.add('active');
+                waDB_markRead(chat.id);
+                document.getElementById('wawEmptyState').style.display = 'none';
+                var ca = document.getElementById('wawConvActive');
+                if (ca) ca.style.display = 'flex';
+                document.getElementById('wawConvAv').innerHTML = waAvatarHtml(chat, chat.emoji);
+                document.getElementById('wawConvName').textContent = chat.name;
+                document.getElementById('wawConvSub').textContent = isLid(chat.id) ? 'ID WhatsApp sécurisé' : chat.id;
+                var msi = document.getElementById('wawMsgSearchInp');
+                if (msi) msi.value = '';
+                wawRenderMsgsFromDB();
+                wawFetchConvFromAPI();
+                var inp = document.getElementById('wawInp');
+                if (inp) inp.focus();
+            };
+            waHubHandleMessage = function(data){
+                var chatId = normalizeDest(data.chatId || data.from || '');
+                if (!chatId || wawIsIgnorableChatId(chatId)) return;
+                var isG = isGroup(chatId) || !!data.isGroup;
+                var name = displayName(data, chatId);
+                var chats = waUpsertChat(waDB_loadChats(), { id:chatId, umId:chatId, name:name, pushName:data.pushName, chatName:data.chatName, isGroup:isG, picture:data.picture || data.profilePicUrl });
+                waDB_saveChats(chats);
+                var ts = data.timestamp || data.ts || Math.floor(Date.now()/1000);
+                var d = new Date(ts*1000);
+                var entry = {
+                    id:data.id || (String(ts) + chatId),
+                    from:data.fromMe ? 'me' : (data.pushName || data.sender || name),
+                    body:data.body || '',
+                    fromMe:!!data.fromMe,
+                    ts:ts,
+                    time:d.toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'}),
+                    date:d.toLocaleDateString('fr-FR'),
+                    read:chatId === wawActiveChatId,
+                    delivered:true,
+                    hasMedia:!!data.hasMedia,
+                    mediaType:data.mediaType || null,
+                    mediaMime:data.mimeType || data.mimetype || null,
+                    fileName:data.fileName || null,
+                    participant:data.participant || '',
+                    quotedMessageId:data.quotedMessageId || '',
+                    quotedText:data.quotedText || '',
+                    quotedParticipant:data.quotedParticipant || '',
+                    mentionedJid:data.mentionedJid || [],
+                    isReaction:!!data.isReaction,
+                    reactionTo:data.reactionTo || '',
+                    reactionText:data.reactionText || ''
+                };
+                waDB_mergeMsgs(chatId, [entry]);
+                wawBuildAllChats(); wawRenderChatList(); wawUpdateTotalBadge();
+                if (chatId === wawActiveChatId) wawRenderMsgsFromDB();
+                if (chatId !== wawActiveChatId && !data.fromMe) wawShowNotif(entry.from, entry.body || wawPreviewText(entry));
+            };
+            wawSyncServerChats = async function(force){
+                try {
+                    var suffix = force ? '?refresh=1' : '';
+                    var db = waDB_loadChats();
+                    var endpoints = ['/whatsapp/chats'+suffix, '/whatsapp/contacts'+suffix, '/whatsapp/groups'+suffix];
+                    for (var i=0; i<endpoints.length; i++) {
+                        try {
+                            var r = await fetch(RAILWAY_API + endpoints[i]);
+                            var d = await r.json();
+                            var arr = d.chats || d.contacts || d.groups || [];
+                            arr.forEach(function(item){ db = waUpsertChat(db, item); });
+                        } catch(_) {}
+                    }
+                    waDB_saveChats(db);
+                    wawBuildAllChats(); wawRenderChatList(); wawUpdateTotalBadge();
+                    return true;
+                } catch(e) { return false; }
+            };
+            wawFetchConvFromAPI = function(){
+                if (!wawActiveChatId) return;
+                var icon = document.getElementById('wawConvSyncIcon');
+                if (icon) icon.style.animation = 'spin 1s linear infinite';
+                fetch(RAILWAY_API + '/whatsapp/messages?chatId=' + encodeURIComponent(wawActiveChatId))
+                    .then(function(r){ return r.json(); })
+                    .then(function(data){
+                        if (icon) icon.style.animation = '';
+                        var msgs = data.messages || data.data || [];
+                        var norm = msgs.map(function(m){
+                            var ts = m.timestamp || m.ts || Math.floor(Date.now()/1000);
+                            var dt = new Date(ts*1000);
+                            return {
+                                id:m.id || m.messageId || (String(ts)+wawActiveChatId),
+                                serverId:m.id || m.messageId || '',
+                                from:m.from || m.pushName || '?',
+                                body:m.body || m.message || '',
+                                fromMe:!!m.fromMe,
+                                ts:ts,
+                                time:dt.toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'}),
+                                date:dt.toLocaleDateString('fr-FR'),
+                                read:true,
+                                delivered:true,
+                                hasMedia:!!m.hasMedia,
+                                mediaType:m.mediaType || null,
+                                mediaMime:m.mimeType || m.mimetype || null,
+                                fileName:m.fileName || null,
+                                participant:m.participant || '',
+                                quotedMessageId:m.quotedMessageId || '',
+                                quotedText:m.quotedText || '',
+                                quotedParticipant:m.quotedParticipant || '',
+                                mentionedJid:m.mentionedJid || [],
+                                reactions:m.reactions || []
+                            };
+                        });
+                        waDB_mergeMsgs(wawActiveChatId, norm);
+                        wawRenderMsgsFromDB(); wawBuildAllChats(); wawRenderChatList();
+                    })
+                    .catch(function(){ if (icon) icon.style.animation = ''; });
+            };
+            wawSend = function(){
+                var inp = document.getElementById('wawInp');
+                var msg = (inp?.value || '').trim();
+                var file = wawAttachedFile;
+                if ((!msg && !file) || !wawActiveChatId) return;
+                var toJid = wawResolveSendJid(wawActiveChatId);
+                if (!toJid) { toast('⚠️ Destinataire WhatsApp invalide. Lancez Sync puis réessayez.','var(--amber)'); return; }
+                var replyId = wawReplyTo && wawReplyTo.id;
+                var ts = Math.floor(Date.now()/1000);
+                var dt = new Date(ts*1000);
+                var localId = 'local_' + Date.now();
+                var btn = document.getElementById('wawSendBtn');
+                if (btn) btn.disabled = true;
+                var entry = {
+                    id:localId, from:'me', body:msg || (file ? '[media]' : ''), fromMe:true, ts:ts,
+                    time:dt.toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'}),
+                    date:dt.toLocaleDateString('fr-FR'), read:true, delivered:false, failed:false,
+                    quotedMessageId:replyId || '', hasMedia:!!file,
+                    mediaType:file ? ((file.type || '').split('/')[0] || 'document') : null,
+                    mediaMime:file ? (file.type || 'application/octet-stream') : null,
+                    fileName:file ? file.name : null
+                };
+                if (file && (file.type || '').indexOf('image/') === 0) {
+                    var th = document.getElementById('wawAttachThumb');
+                    if (th?.src) wawRememberMedia(localId, th.src, entry.mediaMime, entry.fileName);
+                }
+                waDB_mergeMsgs(wawActiveChatId, [entry]);
+                if (inp) { inp.value = ''; inp.style.height = '21px'; }
+                if (file) wawRemoveAttach();
+                if (replyId) wawCancelReply();
+                wawRenderMsgsFromDB();
+                var promise = file
+                    ? wawSendMediaBase64(toJid, file, msg, replyId)
+                    : fetch(RAILWAY_API + (replyId ? '/whatsapp/reply' : '/whatsapp/send'), {
+                        method:'POST', headers:{'Content-Type':'application/json'},
+                        body:JSON.stringify(replyId ? { chatId:toJid, messageId:replyId, message:msg } : { to:toJid, message:msg })
+                    }).then(function(r){ return r.json().then(function(d){ if (!r.ok || d.success === false) throw new Error(d.error || ('HTTP '+r.status)); return d; }); });
+                promise.then(function(d){
+                    var msgs = waDB_loadMsgs(wawActiveChatId);
+                    var m = msgs.find(function(x){ return x.id === localId; });
+                    if (m) {
+                        m.delivered = true; m.failed = false;
+                        if (d.messageId) m.serverId = d.messageId;
+                        waDB_saveMsgs(wawActiveChatId, msgs);
+                    }
+                    wawRenderMsgsFromDB(); wawBuildAllChats(); wawRenderChatList();
+                }).catch(function(e){
+                    var msgs = waDB_loadMsgs(wawActiveChatId);
+                    var m = msgs.find(function(x){ return x.id === localId; });
+                    if (m) { m.failed = true; m.delivered = false; waDB_saveMsgs(wawActiveChatId, msgs); }
+                    wawRenderMsgsFromDB();
+                    toast('⚠️ Non envoyé: ' + (e.message || 'erreur WhatsApp'), 'var(--amber)');
+                }).finally(function(){ if (btn) btn.disabled = false; });
+            };
+            wawResetLocalWhatsApp = function(){
+                if (!confirm('Nettoyer WhatsApp local? Les conversations/messages stockés dans ce navigateur seront effacés puis reconstruits depuis le serveur.')) return;
+                Object.keys(localStorage).forEach(function(k){
+                    if (k === CHAT_KEY || k.indexOf('kmWaMsgs_') === 0 || k.indexOf('kmWaCleanCore') === 0) localStorage.removeItem(k);
+                });
+                wawActiveChatId = null;
+                wawAllChats = [];
+                var active = document.getElementById('wawConvActive');
+                var empty = document.getElementById('wawEmptyState');
+                if (active) active.style.display = 'none';
+                if (empty) empty.style.display = 'flex';
+                cleanBootstrap();
+                wawBuildAllChats(); wawRenderChatList(); wawUpdateTotalBadge();
+                wawSyncServerChats(true).then(function(){
+                    toast('✅ WhatsApp nettoyé et reconstruit', '#25D366');
+                });
+            };
+
+            cleanBootstrap();
+            window.addEventListener('load', function(){
+                cleanBootstrap();
+                if (typeof wawBuildAllChats === 'function') { wawBuildAllChats(); wawRenderChatList(); wawUpdateTotalBadge(); }
+                wawSyncServerChats(false);
+            });
+        })();
 
         // ESC to close
 document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeBdModal();closeTrucksModal();closeConvModal();document.getElementById('kbdPanel')?.classList.remove('on');}});
